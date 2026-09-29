@@ -1,0 +1,8 @@
+[package]
+name = "xgpu-core"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Runtime-neutral resource handles and contracts for xgpu"
+

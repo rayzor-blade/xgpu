@@ -1,0 +1,15 @@
+[package]
+name = "xgpu-bindgen"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Shared WebGPU API, WebIDL, wire, and runtime binding generators"
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+# The WebIDL parser the wire generator reads the whole IDL with.
+weedle2 = "5"
+wgpu-types = "30"
