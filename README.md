@@ -30,6 +30,39 @@ need to call the generator or depend on xgpu's internal crates directly.
 | Ash / HashLink | Adapter realignment is in progress in hlwgpu; Ash Future is available | `hlwgpu` |
 | Rayzor | Native adapter, generated externs, shared buffers, and Rayzor compute extensions | `rayzor-gpu.rpkg` |
 
+## GPU backends and platforms
+
+xgpu exposes the backend names supported by its wgpu implementation:
+
+| Backend | Platforms | Driver used |
+|---|---|---|
+| Metal | macOS and iOS | The system Metal driver |
+| Direct3D 12 | Windows | The system D3D12 driver; this is the default Windows backend |
+| Vulkan | Linux, Android, and optional Windows builds | The installed Vulkan ICD |
+| OpenGL ES | Android fallback and Emscripten builds | The platform GLES driver |
+| Browser WebGPU | Browser Wasm and browser-hosted WASI/Wasm threads | The browser's WebGPU implementation |
+
+Current adapters build or package these targets:
+
+| Platform | Architectures | Available graphics backends |
+|---|---|---|
+| macOS | Apple Silicon and x86-64 | Metal |
+| iOS | arm64 devices and Apple Silicon simulator | Metal |
+| Windows | x86-64 | Direct3D 12; Vulkan in the Vulkan build |
+| Linux | x86-64 and arm64 | Vulkan |
+| Android | arm64, armv7, and x86-64 | Vulkan and OpenGL ES |
+| Browser | wasm32 | Browser WebGPU |
+| Browser-hosted WASI | wasm32 WASI and threaded WASI | Browser WebGPU through the runtime harness |
+| Emscripten | wasm32 | OpenGL ES |
+
+Hardware support follows wgpu and the drivers installed on the target system.
+xgpu does not bundle or select a vendor driver. `Noop` is reserved for internal
+and headless use; it is not a graphics driver.
+
+Rayzor additionally offers direct Metal compute and CUDA/NVRTC compute. These
+are Rayzor extensions layered beside the portable xgpu API, so CUDA is not an
+xgpu `Backend` value.
+
 The API is named `gpu`. Caribou and Ash expose it as `gpu`; Rayzor keeps its
 established `rayzor.gpu` package and `rayzor-gpu.rpkg`. The generated GPU class
 names and behavior stay aligned across runtimes while each adapter follows its
