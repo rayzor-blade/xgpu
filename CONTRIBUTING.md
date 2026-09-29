@@ -58,9 +58,10 @@ so adapters include those wrappers instead of registering the typed model
 methods directly. This keeps native and wasm function signatures consistent.
 
 HashLink/Ash adapters use `hl_abi` for allocation, roots, strings, bytes,
-objects, and `DEFINE_PRIM` exports. Rayzor adapters use
-`rayzor.concurrent.Future<T>` for Promise results. Both runtimes still need an
-externally completable Future bridge for asynchronous native callbacks.
+objects, and `DEFINE_PRIM` exports. Promise results use `ash.Future<T>` through
+Ash's `ash_future_abi`; Rayzor adapters use `rayzor.concurrent.Future<T>`.
+Runtime adapters own the conversion from xgpu's resource handles to each
+carrier's resolved value.
 
 ## Validation
 

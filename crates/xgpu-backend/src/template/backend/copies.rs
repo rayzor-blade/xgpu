@@ -85,10 +85,10 @@ pub(super) fn copying(
     if held.pass.is_some() || held.compute.is_some() {
         return host::raise(ErrorKind::Runtime, "a pass is open on this encoder");
     }
-    if let Some(encoder) = held.encoder.as_mut()
-        && let Err(message) = body(encoder)
-    {
-        host::raise(ErrorKind::Type, &message);
+    if let Some(encoder) = held.encoder.as_mut() {
+        if let Err(message) = body(encoder) {
+            host::raise(ErrorKind::Type, &message);
+        }
     }
 }
 

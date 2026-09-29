@@ -615,6 +615,7 @@ fn scalar(ty: &Type) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RustTarget {
     Caribou,
+    HashLink,
     Rayzor,
 }
 
@@ -698,6 +699,21 @@ pub fn generate_caribou(
 /// and the generic Enum carrier; xgpu supplies the object model and backend.
 pub fn generate_rayzor(declaration: &str, webidl: &str) -> Result<String, String> {
     generate_rayzor_with_resources(declaration, webidl, &[])
+}
+
+/// Emit the runtime-neutral model and HashLink primitive resolvers used by
+/// hlwgpu. Resources cross as integer handles, records as GC-finalized native
+/// abstracts, and Promise results as Ash Future carriers.
+pub fn generate_hashlink(declaration: &str, webidl: &str) -> Result<String, String> {
+    let (model, _, plugin) = generate_parts(
+        "gpu",
+        declaration,
+        webidl,
+        RustTarget::HashLink,
+        &HashSet::new(),
+    )?;
+    let registration = hashlink_registration(&model, &plugin)?;
+    Ok(format!("{model} {registration}"))
 }
 
 /// Generate Rayzor bindings while letting its adapter own selected resource
@@ -948,6 +964,229 @@ fn rayzor_registration(model: &str) -> Result<String, String> {
         }
     }
     .to_string())
+}
+
+fn hashlink_signature(ty: &Type, result: bool, plugin: &convert::Plugin) -> Result<String, String> {
+    if let Type::Reference(reference) = ty {
+        let name = type_name(&reference.elem).ok_or("HashLink references need named types")?;
+        if plugin.resources.contains(&name) {
+            return Ok("i".into());
+        }
+        if plugin.records.iter().any(|record| record.class == name) {
+            return Ok(format!("Xxgpu_{name}_"));
+        }
+        return Err(format!("unsupported HashLink reference {name}"));
+    }
+    if let Type::Tuple(tuple) = ty
+        && tuple.elems.is_empty()
+    {
+        return Ok("v".into());
+    }
+    if let Some(inner) = generic(ty, "Box") {
+        let name = type_name(&inner).ok_or("HashLink boxes need named types")?;
+        return if plugin.resources.contains(&name) {
+            Ok("i".into())
+        } else if plugin.records.iter().any(|record| record.class == name) {
+            Ok(format!("Xxgpu_{name}_"))
+        } else {
+            Err(format!("unsupported HashLink box {name}"))
+        };
+    }
+    if generic(ty, "Future").is_some() {
+        return Ok("Xash_future_".into());
+    }
+    if generic(ty, "Enum").is_some() {
+        return Ok("i".into());
+    }
+    match type_name(ty).as_deref() {
+        Some("bool") => Ok("b".into()),
+        Some("f32") => Ok("f".into()),
+        Some("f64") => Ok("d".into()),
+        Some("i32" | "u32") => Ok("i".into()),
+        Some("i64" | "u64") => Ok("l".into()),
+        Some("Text") if result => Ok("B".into()),
+        Some("Buffer") if result => Ok("Xxgpu_buffer_result_".into()),
+        Some("Text" | "Buffer" | "BufferMut") => Ok("OBi_".into()),
+        Some(name) => Err(format!("unsupported HashLink ABI type {name}")),
+        None => Err("unsupported composite HashLink ABI type".into()),
+    }
+}
+
+fn hashlink_argument(
+    name: &syn::Ident,
+    ty: &Type,
+    plugin: &convert::Plugin,
+) -> Result<(TokenStream, TokenStream), String> {
+    if let Type::Reference(reference) = ty {
+        let target = type_name(&reference.elem).ok_or("HashLink references need named types")?;
+        let inner = &reference.elem;
+        if plugin.resources.contains(&target) {
+            return Ok((
+                if reference.mutability.is_some() {
+                    quote!(mut #name: i32)
+                } else {
+                    quote!(#name: i32)
+                },
+                if reference.mutability.is_some() {
+                    quote!(unsafe { &mut *(&mut #name as *mut i32).cast::<#inner>() })
+                } else {
+                    quote!(unsafe { &*(&#name as *const i32).cast::<#inner>() })
+                },
+            ));
+        }
+        if plugin.records.iter().any(|record| record.class == target) {
+            return Ok((
+                quote!(#name: *mut runtime::Managed<#inner>),
+                if reference.mutability.is_some() {
+                    quote!(unsafe { runtime::managed_mut(#name) })
+                } else {
+                    quote!(unsafe { runtime::managed_ref(#name) })
+                },
+            ));
+        }
+    }
+    if generic(ty, "Enum").is_some() {
+        return Ok((quote!(#name: i32), quote!(Enum::from_native(#name))));
+    }
+    match type_name(ty).as_deref() {
+        Some("Text") => Ok((
+            quote!(#name: *mut hl_abi::vstring),
+            quote!(unsafe { Text::from_hl(#name) }),
+        )),
+        Some("Buffer") => Ok((
+            quote!(#name: *mut hl_abi::vstring),
+            quote!(unsafe { Buffer::from_hl(#name) }),
+        )),
+        Some("BufferMut") => Ok((
+            quote!(#name: *mut hl_abi::vstring),
+            quote!(unsafe { BufferMut::from_hl(#name) }),
+        )),
+        Some("i32" | "u32" | "i64" | "u64" | "f32" | "f64" | "bool") => {
+            Ok((quote!(#name: #ty), quote!(#name)))
+        }
+        Some(target) => Err(format!("unsupported HashLink argument {target}")),
+        None => Err("unsupported composite HashLink argument".into()),
+    }
+}
+
+fn hashlink_return(
+    call: TokenStream,
+    output: &ReturnType,
+    plugin: &convert::Plugin,
+) -> Result<(TokenStream, TokenStream), String> {
+    let ReturnType::Type(_, ty) = output else {
+        return Ok((quote!(), quote!({ #call; })));
+    };
+    if let Some(inner) = generic(ty, "Box") {
+        let name = type_name(&inner).ok_or("HashLink boxes need named types")?;
+        if plugin.resources.contains(&name) {
+            return Ok((quote!(i32), quote!({ let value = #call; value.handle })));
+        }
+        if plugin.records.iter().any(|record| record.class == name) {
+            return Ok((
+                quote!(*mut runtime::Managed<#inner>),
+                quote!({ let value = #call; runtime::managed_new(*value) }),
+            ));
+        }
+    }
+    if generic(ty, "Enum").is_some() {
+        return Ok((
+            quote!(i32),
+            quote!({ let value = #call; value.get().native() }),
+        ));
+    }
+    if let Some(inner) = generic(ty, "Future") {
+        return Ok((
+            quote!(*mut ash_future_abi::AshFuture),
+            quote!({ let value: Future<#inner> = #call; value.as_ptr() }),
+        ));
+    }
+    match type_name(ty).as_deref() {
+        Some("Text") => Ok((
+            quote!(*mut hl_abi::vbyte),
+            quote!({ let value = #call; value.into_ucs2() }),
+        )),
+        Some("Buffer") => Ok((
+            quote!(*mut runtime::Managed<Buffer>),
+            quote!({ let value = #call; runtime::managed_new(value) }),
+        )),
+        Some("i32" | "u32" | "i64" | "u64" | "f32" | "f64" | "bool") => {
+            Ok((quote!(#ty), quote!({ #call })))
+        }
+        Some(target) => Err(format!("unsupported HashLink result {target}")),
+        None => Err("unsupported composite HashLink result".into()),
+    }
+}
+
+/// Derive every `DEFINE_PRIM` resolver from the generated typed model so its
+/// signature and the Haxe surface cannot drift apart.
+fn hashlink_registration(model: &str, plugin: &convert::Plugin) -> Result<String, String> {
+    let file = syn::parse_file(model).map_err(error)?;
+    let mut wrappers = TokenStream::new();
+    let mut count = 0usize;
+    for item in file.items {
+        let Item::Impl(item) = item else { continue };
+        let Type::Path(class_path) = &*item.self_ty else {
+            continue;
+        };
+        let Some(class) = class_path.path.get_ident() else {
+            continue;
+        };
+        for member in item.items {
+            let syn::ImplItem::Fn(method) = member else {
+                continue;
+            };
+            if method.sig.abi.as_ref().is_none() {
+                continue;
+            }
+            let method_name = method.sig.ident.unraw().to_string();
+            let native_name = format!(
+                "{}_{}",
+                haxe::snake(&class.to_string()),
+                haxe::snake(&method_name),
+            );
+            let function = &method.sig.ident;
+            let wrapper = quote::format_ident!("__hl_{native_name}");
+            let resolver = quote::format_ident!("hlp_{native_name}");
+            let mut params = Vec::new();
+            let mut args = Vec::new();
+            let mut signature = String::from("P");
+            for (at, arg) in method.sig.inputs.iter().enumerate() {
+                let FnArg::Typed(arg) = arg else {
+                    return Err("generated HashLink functions use typed parameters".into());
+                };
+                signature.push_str(&hashlink_signature(&arg.ty, false, plugin)?);
+                let name = quote::format_ident!("a{at}");
+                let (parameter, converted) = hashlink_argument(&name, &arg.ty, plugin)?;
+                params.push(parameter);
+                args.push(converted);
+            }
+            signature.push('_');
+            match &method.sig.output {
+                ReturnType::Default => signature.push('v'),
+                ReturnType::Type(_, ty) => {
+                    signature.push_str(&hashlink_signature(ty, true, plugin)?)
+                }
+            }
+            let call = quote!(#class::#function(#(#args),*));
+            let (ret, body) = hashlink_return(call, &method.sig.output, plugin)?;
+            let output = if ret.is_empty() {
+                quote!()
+            } else {
+                quote!(-> #ret)
+            };
+            wrappers.extend(quote! {
+                #[unsafe(no_mangle)]
+                pub unsafe extern "C" fn #wrapper(#(#params),*) #output #body
+                hl_abi::define_prim!(#resolver, #wrapper, #signature);
+            });
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return Err("HashLink generation produced no primitives".into());
+    }
+    Ok(wrappers.to_string())
 }
 
 fn generate_parts(
@@ -1210,7 +1449,7 @@ fn generate_parts(
                 } else {
                     quote!(#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)])
                 };
-                let native_enum = if target == RustTarget::Rayzor {
+                let native_enum = if target != RustTarget::Caribou {
                     quote! {
                         impl NativeEnum for #name {
                             fn native(self) -> i32 { #name::native(self) }
@@ -1792,6 +2031,7 @@ fn generate_parts(
                 } else {
                     (
                         quote! {
+                            #[repr(C)]
                             #[derive(Default)]
                             pub struct #class { pub(crate) handle: i32 }
                         },
@@ -1934,6 +2174,15 @@ mod tests {
         assert!(generated.contains("xgpu_gpu_device_create_buffer"));
         assert!(generated.contains("\"rayzor::gpu::GpuDevice\""));
         assert!(generated.contains("pub fn xgpu_runtime_symbols"));
+    }
+
+    #[test]
+    fn the_complete_hashlink_model_emits_ash_future_primitives() {
+        let generated = generate_hashlink(&gpu_api(), WEBGPU_IDL).unwrap();
+        assert!(generated.contains("hlp_gpu_instance_request_adapter"));
+        assert!(generated.contains("Xash_future_"));
+        assert!(generated.contains("runtime :: Managed < GpuDeviceDescriptor >"));
+        assert!(generated.contains("value . into_ucs2"));
     }
 
     #[test]

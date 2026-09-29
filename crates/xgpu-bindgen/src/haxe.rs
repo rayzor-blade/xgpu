@@ -10,7 +10,8 @@ use syn::{FnArg, GenericArgument, Item, PathArguments, ReturnType, TraitItem, Ty
 /// The native binding convention an extern set targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Runtime {
-    /// HashLink/Ash HDLL symbols loaded from `xgpu`.
+    /// HashLink HDLL symbols loaded from `xgpu`; Promise results use Ash's
+    /// externally completable Future carrier.
     HashLink,
     /// Rayzor package methods and `rayzor.concurrent.Future<T>`.
     Rayzor,
@@ -45,6 +46,31 @@ pub fn generate(
         .map(|r| (r.class.to_string(), r))
         .collect();
     let mut out = Vec::new();
+
+    if runtime == Runtime::HashLink {
+        out.push(source(
+            namespace,
+            "XgpuBytes",
+            r#"@:noCompletion
+class XgpuBytes {
+	public static function take(value:hl.Abstract<"xgpu_buffer_result">):haxe.io.Bytes {
+		if (value == null) return null;
+		var out = haxe.io.Bytes.alloc(XgpuBytesNative.length(value));
+		XgpuBytesNative.copy(value, out);
+		return out;
+	}
+}
+
+private extern class XgpuBytesNative {
+	@:hlNative("xgpu", "buffer_result_len")
+	public static function length(value:hl.Abstract<"xgpu_buffer_result">):Int;
+	@:hlNative("xgpu", "buffer_result_copy")
+	public static function copy(value:hl.Abstract<"xgpu_buffer_result">, out:haxe.io.Bytes):Void;
+}
+"#
+            .to_owned(),
+        ));
+    }
 
     for item in file.items {
         match item {
@@ -105,18 +131,32 @@ pub fn generate(
                     continue;
                 };
                 let name = item.ident.to_string();
-                let constants = items
-                    .into_iter()
-                    .filter_map(|item| match item {
-                        Item::Const(c) => Some(format!(
+                let mut constants = Vec::new();
+                if let Some(imported) = super::idl_name(&item.attrs)? {
+                    let tokens = super::tokens(webidl)?;
+                    let body = super::body(&tokens, "namespace", &imported)?;
+                    for statement in body.split(|token| token == ";").filter(|s| !s.is_empty()) {
+                        if statement.len() != 5
+                            || statement[0] != "const"
+                            || statement[3] != "="
+                        {
+                            return Err(format!("unsupported constant in {imported}"));
+                        }
+                        constants.push(format!(
                             "\tpublic static inline var {}:Int = {};",
-                            c.ident,
-                            c.expr.to_token_stream()
-                        )),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                            statement[2], statement[4]
+                        ));
+                    }
+                }
+                constants.extend(items.into_iter().filter_map(|item| match item {
+                    Item::Const(c) => Some(format!(
+                        "\tpublic static inline var {}:Int = {};",
+                        c.ident,
+                        c.expr.to_token_stream()
+                    )),
+                    _ => None,
+                }));
+                let constants = constants.join("\n");
                 out.push(source(
                     namespace,
                     &name,
@@ -128,6 +168,10 @@ pub fn generate(
                 let record = records
                     .get(&name)
                     .ok_or_else(|| format!("record {name} was not described"))?;
+                if runtime == Runtime::HashLink {
+                    out.push(hashlink_record(namespace, &name, record, &plugin)?);
+                    continue;
+                }
                 let mut required = Vec::new();
                 let mut methods = Vec::new();
                 for (field, ty, _) in &record.fields {
@@ -210,6 +254,10 @@ pub fn generate(
             }
             Item::Trait(item) => {
                 let name = item.ident.to_string();
+                if runtime == Runtime::HashLink {
+                    out.push(hashlink_resource(namespace, &name, &item)?);
+                    continue;
+                }
                 let mut methods = Vec::new();
                 for entry in item.items {
                     let TraitItem::Fn(method) = entry else {
@@ -263,10 +311,193 @@ pub fn generate(
     Ok(out)
 }
 
+fn hashlink_record(
+    namespace: &str,
+    name: &str,
+    record: &super::convert::Record,
+    plugin: &super::convert::Plugin,
+) -> Result<File, String> {
+    let mut required = Vec::new();
+    let mut methods: Vec<(String, Vec<(String, Type)>)> = Vec::new();
+    for (field, ty, _) in &record.fields {
+        let field = field.to_string().trim_start_matches("r#").to_owned();
+        if let Some((key, value)) = pair(ty, "Map") {
+            methods.push((
+                format!("add{}", super::pascal(&field)),
+                vec![("key".into(), key), ("value".into(), value)],
+            ));
+            continue;
+        }
+        let (container, mut value) = if let Some(value) = one(ty, "Option") {
+            ("option", value)
+        } else if let Some(value) = one(ty, "Vec") {
+            ("sequence", value)
+        } else {
+            ("required", ty.clone())
+        };
+        if container == "sequence" {
+            value = one(&value, "Option").unwrap_or(value);
+        }
+        if let Some(alternatives) = plugin.unions.get(&simple_name(&value).unwrap_or_default()) {
+            for (variant, ty, _) in alternatives {
+                let method = if container == "sequence" {
+                    format!("add{}{variant}", super::pascal(&field))
+                } else {
+                    format!("{field}{variant}")
+                };
+                methods.push((method, vec![("value".into(), ty.clone())]));
+            }
+        } else if container == "sequence" {
+            methods.push((
+                format!("add{}", super::pascal(&field)),
+                vec![("value".into(), value)],
+            ));
+        } else if container == "option" {
+            methods.push((field, vec![("value".into(), value)]));
+        } else {
+            required.push((field, value));
+        }
+    }
+    let abstract_ty = format!("hl.Abstract<\"xgpu_{name}\">");
+    let args = haxe_args(&required, Runtime::HashLink)?;
+    let names = required
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut public = format!(
+        "abstract {name}({abstract_ty}) {{\n\tpublic inline function new({args}) this = {name}Native.create({names});"
+    );
+    let mut native_class = format!(
+        "private extern class {name}Native {{\n\t{}\n\tpublic static function create({args}):{abstract_ty};",
+        native(Runtime::HashLink, name, "new"),
+    );
+    for (method, params) in methods {
+        let args = haxe_args(&params, Runtime::HashLink)?;
+        let names = params
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let comma = if names.is_empty() { "" } else { ", " };
+        public.push_str(&format!(
+            "\n\tpublic inline function {method}({args}):Void {name}Native.{method}(this{comma}{names});"
+        ));
+        native_class.push_str(&format!(
+            "\n\t{}\n\tpublic static function {method}(self:{abstract_ty}{comma}{args}):Void;",
+            native(Runtime::HashLink, name, &method),
+        ));
+    }
+    public.push_str("\n}\n\n");
+    native_class.push_str("\n}\n");
+    Ok(source(namespace, name, format!("{public}{native_class}")))
+}
+
+fn hashlink_resource(namespace: &str, name: &str, item: &syn::ItemTrait) -> Result<File, String> {
+    let mut public = format!("abstract {name}(Int) from Int to Int {{");
+    let mut native_class = format!("private extern class {name}Native {{");
+    for entry in &item.items {
+        let TraitItem::Fn(method) = entry else {
+            continue;
+        };
+        let rust_name = method.sig.ident.to_string();
+        let mut params = Vec::new();
+        let mut instance = false;
+        for (at, arg) in method.sig.inputs.iter().enumerate() {
+            let FnArg::Typed(arg) = arg else { continue };
+            let syn::Pat::Ident(param) = &*arg.pat else {
+                continue;
+            };
+            if at == 0 && param.ident == "this" && reference_name(&arg.ty).as_deref() == Some(name)
+            {
+                instance = true;
+                continue;
+            }
+            params.push((param.ident.to_string(), (*arg.ty).clone()));
+        }
+        let args = haxe_args(&params, Runtime::HashLink)?;
+        let names = params
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ret_ty = match &method.sig.output {
+            ReturnType::Default => syn::parse_quote!(()),
+            ReturnType::Type(_, ty) => (**ty).clone(),
+        };
+        let ret = hx_type(&ret_ty, Runtime::HashLink)?;
+        let native_ret = match simple_name(&ret_ty).as_deref() {
+            Some("Text") => "hl.Bytes".to_owned(),
+            Some("Buffer") => "hl.Abstract<\"xgpu_buffer_result\">".to_owned(),
+            _ => ret.clone(),
+        };
+        let native_args = if instance {
+            if args.is_empty() {
+                "self:Int".to_owned()
+            } else {
+                format!("self:Int, {args}")
+            }
+        } else {
+            args.clone()
+        };
+        let native_method = if rust_name == "new" {
+            "create"
+        } else {
+            &rust_name
+        };
+        native_class.push_str(&format!(
+            "\n\t{}\n\tpublic static function {native_method}({native_args}):{native_ret};",
+            native(Runtime::HashLink, name, &rust_name),
+        ));
+        let call_args = if instance {
+            if names.is_empty() {
+                "this".to_owned()
+            } else {
+                format!("this, {names}")
+            }
+        } else {
+            names
+        };
+        let call = format!("{name}Native.{native_method}({call_args})");
+        let body = match simple_name(&ret_ty).as_deref() {
+            Some("Text") => format!(
+                "{{ var value = {call}; return value == null ? null : @:privateAccess String.fromUCS2(value); }}"
+            ),
+            Some("Buffer") => format!("return XgpuBytes.take({call})"),
+            _ if matches!(&ret_ty, Type::Tuple(tuple) if tuple.elems.is_empty()) => {
+                format!("{call}")
+            }
+            _ => format!("return {call}"),
+        };
+        if rust_name == "new" {
+            public.push_str(&format!(
+                "\n\tpublic inline function new({args}) this = {call};"
+            ));
+        } else {
+            let static_ = if instance { "" } else { "static " };
+            public.push_str(&format!(
+                "\n\tpublic {static_}inline function {rust_name}({args}):{ret} {body};"
+            ));
+        }
+    }
+    public.push_str("\n}\n\n");
+    native_class.push_str("\n}\n");
+    Ok(source(namespace, name, format!("{public}{native_class}")))
+}
+
+fn haxe_args(args: &[(String, Type)], runtime: Runtime) -> Result<String, String> {
+    args.iter()
+        .map(|(name, ty)| Ok(format!("{name}:{}", hx_type(ty, runtime)?)))
+        .collect::<Result<Vec<_>, String>>()
+        .map(|args| args.join(", "))
+}
+
 fn source(namespace: &str, name: &str, body: String) -> File {
     File {
         path: format!("{}/{name}.hx", namespace.replace('.', "/")),
-        source: format!("package {namespace};\n\n{body}"),
+        source: format!(
+            "// Generated by xgpu-bindgen. Do not edit by hand.\npackage {namespace};\n\n{body}"
+        ),
     }
 }
 
@@ -324,7 +555,7 @@ fn hx_type(ty: &Type, runtime: Runtime) -> Result<String, String> {
     if let Some(inner) = one(ty, "Future") {
         let inner = hx_type(&inner, runtime)?;
         return Ok(match runtime {
-            Runtime::HashLink => format!("ash.concurrent.Future<{inner}>"),
+            Runtime::HashLink => format!("ash.Future<{inner}>"),
             Runtime::Rayzor => format!("rayzor.concurrent.Future<{inner}>"),
         });
     }
@@ -422,7 +653,7 @@ mod tests {
             .find(|f| f.path.ends_with("GpuAdapter.hx"))
             .unwrap()
             .source;
-        assert!(adapter.contains("ash.concurrent.Future<GpuDevice>"));
+        assert!(adapter.contains("ash.Future<GpuDevice>"));
         assert!(adapter.contains("@:hlNative(\"xgpu\", \"gpu_adapter_request_device\")"));
     }
 
@@ -431,12 +662,27 @@ mod tests {
         for runtime in [Runtime::HashLink, Runtime::Rayzor] {
             let files = crate::haxe(runtime).unwrap();
             assert!(files.len() > 100);
+            assert!(files.iter().all(|file| file
+                .source
+                .starts_with("// Generated by xgpu-bindgen. Do not edit by hand.\n")));
             let adapter = files
                 .iter()
                 .find(|f| f.path.ends_with("GpuAdapter.hx"))
                 .unwrap();
             assert!(adapter.source.contains("Future<GpuDevice>"));
             assert!(files.iter().any(|f| f.path.ends_with("TextureFormat.hx")));
+            let map_mode = files
+                .iter()
+                .find(|f| f.path.ends_with("MapMode.hx"))
+                .unwrap();
+            assert!(map_mode.source.contains("READ:Int = 0x0001"));
+            assert!(map_mode.source.contains("WRITE:Int = 0x0002"));
+            let usage = files
+                .iter()
+                .find(|f| f.path.ends_with("BufferUsage.hx"))
+                .unwrap();
+            assert!(usage.source.contains("MAP_READ:Int = 0x0001"));
+            assert!(usage.source.contains("BLAS_INPUT:Int = 1024"));
             if runtime == Runtime::Rayzor {
                 assert!(adapter.path.starts_with("rayzor/gpu/"));
                 assert!(adapter.source.contains("package rayzor.gpu;"));

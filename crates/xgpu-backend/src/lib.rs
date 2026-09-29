@@ -47,6 +47,20 @@ fn include_source(source: &str) -> String {
 
 /// Write the backend bundle beneath `out`, returning its main source path.
 pub fn install(out: impl AsRef<Path>) -> io::Result<std::path::PathBuf> {
+    install_with_scope(out, None)
+}
+
+/// Install the backend for a generated model nested beneath `scope`, such as
+/// `crate::xgpu`. Runtime adapters with an older API can then carry both
+/// surfaces during migration without their crate-root types colliding.
+pub fn install_scoped(out: impl AsRef<Path>, scope: &str) -> io::Result<std::path::PathBuf> {
+    install_with_scope(out, Some(scope))
+}
+
+fn install_with_scope(
+    out: impl AsRef<Path>,
+    scope: Option<&str>,
+) -> io::Result<std::path::PathBuf> {
     let root = out.as_ref().join("xgpu_backend");
     let modules = root.join("backend");
     std::fs::create_dir_all(&modules)?;
@@ -65,7 +79,14 @@ pub fn install(out: impl AsRef<Path>) -> io::Result<std::path::PathBuf> {
             ));
         }
         backend = backend.replace(&declaration, &included);
-        std::fs::write(modules.join(format!("{name}.rs")), include_source(source))?;
+        let source = include_source(source);
+        let source = scope.map_or(source.clone(), |scope| {
+            source.replace("crate::", &format!("{scope}::"))
+        });
+        std::fs::write(modules.join(format!("{name}.rs")), source)?;
+    }
+    if let Some(scope) = scope {
+        backend = backend.replace("crate::", &format!("{scope}::"));
     }
     let main = root.join("backend.rs");
     std::fs::write(&main, backend)?;
@@ -86,6 +107,16 @@ mod tests {
         for (name, _) in MODULES {
             assert!(source.contains(&format!("/xgpu_backend/backend/{name}.rs")));
         }
+        std::fs::remove_dir_all(out).unwrap();
+    }
+
+    #[test]
+    fn a_scoped_backend_addresses_its_adapter_module() {
+        let out = std::env::temp_dir().join(format!("xgpu-backend-scoped-{}", std::process::id()));
+        let main = install_scoped(&out, "crate::xgpu").unwrap();
+        let source = std::fs::read_to_string(main).unwrap();
+        assert!(source.contains("crate::xgpu::GpuAdapter"));
+        assert!(!source.contains("crate::GpuAdapter"));
         std::fs::remove_dir_all(out).unwrap();
     }
 }

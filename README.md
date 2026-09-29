@@ -27,7 +27,7 @@ need to call the generator or depend on xgpu's internal crates directly.
 | Runtime | What is ready | Use it through |
 |---|---|---|
 | Caribou | Native plugin, generated language classes, and browser-agent wire | `caribou-gpu` |
-| Ash / HashLink | Runtime integration is in progress | No application package yet |
+| Ash / HashLink | Adapter realignment is in progress in hlwgpu; Ash Future is available | `hlwgpu` |
 | Rayzor | Native adapter, generated externs, shared buffers, and Rayzor compute extensions | `rayzor-gpu.rpkg` |
 
 The API is named `gpu`. Caribou and Ash expose it as `gpu`; Rayzor keeps its
