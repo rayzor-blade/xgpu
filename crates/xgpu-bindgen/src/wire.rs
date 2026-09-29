@@ -1209,18 +1209,24 @@ mod tests {
             .iter()
             .find(|i| i.name == "Element")
             .unwrap();
-        assert!(element
-            .operations
-            .iter()
-            .any(|o| o.name == "requestFullscreen"));
-        assert!(element
-            .operations
-            .iter()
-            .any(|o| o.name == "requestPointerLock"));
+        assert!(
+            element
+                .operations
+                .iter()
+                .any(|o| o.name == "requestFullscreen")
+        );
+        assert!(
+            element
+                .operations
+                .iter()
+                .any(|o| o.name == "requestPointerLock")
+        );
         let wire = wire(idl).unwrap();
-        assert!(wire
-            .rust
-            .contains("pub fn offscreen_canvas_set_width(&mut self, this: Handle, value: &u64)"));
+        assert!(
+            wire.rust.contains(
+                "pub fn offscreen_canvas_set_width(&mut self, this: Handle, value: &u64)"
+            )
+        );
         assert!(wire.js.contains("(self.title = a0)"));
     }
 

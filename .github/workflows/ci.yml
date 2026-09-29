@@ -43,21 +43,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build release generator
         run: cargo build --release --locked -p xgpu-bindgen --bin xgpu-haxe
-      - name: Generate Ash and Rayzor externs
+      - name: Generate runtime externs
         shell: bash
         run: |
           target/release/${{ matrix.executable }} ash generated/ash
           target/release/${{ matrix.executable }} rayzor generated/rayzor
+          target/release/${{ matrix.executable }} javascript generated/javascript
           test -f generated/ash/gpu/GpuDevice.hx
           test -f generated/rayzor/rayzor/gpu/GpuDevice.hx
+          test -f generated/javascript/gpu/js/GPUDevice.hx
+          diff -ru haxe-js/src generated/javascript
       - name: Stage release bundle
         shell: bash
         run: |
           mkdir -p dist/xgpu/bin/${{ matrix.platform }}
           cp target/release/${{ matrix.executable }} dist/xgpu/bin/${{ matrix.platform }}/
+          cp -R haxe-js dist/xgpu/
           cp README.md LICENSE LICENSE.hlwgpu dist/xgpu/
-          # Runtime externs deliberately stay out of this generator bundle.
-          # Ash ships them with xgpu.hdll; Rayzor ships them inside xgpu.rpkg.
+          # Ash ships its externs with xgpu.hdll; Rayzor ships them inside
+          # xgpu.rpkg. Browser-native Haxe has no runtime adapter, so its
+          # complete extern package belongs in this release bundle.
       - uses: actions/upload-artifact@v4
         with:
           name: xgpu-release-${{ matrix.platform }}

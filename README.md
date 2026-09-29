@@ -29,6 +29,11 @@ need to call the generator or depend on xgpu's internal crates directly.
 | Caribou | Native plugin, generated language classes, and browser-agent wire | `caribou-gpu` |
 | Ash / HashLink | Adapter realignment is in progress in hlwgpu; Ash Future is available | `hlwgpu` |
 | Rayzor | Native adapter, generated externs, shared buffers, and Rayzor compute extensions | `rayzor-gpu.rpkg` |
+| Haxe JavaScript | Browser-native WebGPU externs generated from the same IDL | `xgpu-js` |
+
+The release archive includes the `xgpu-js` haxelib. Install or develop-link
+that directory, then compile with `-lib xgpu-js`. Its classes live under
+`gpu.js`, and `gpu.js.WebGPU.gpu` exposes the browser's `navigator.gpu`.
 
 ## GPU backends and platforms
 

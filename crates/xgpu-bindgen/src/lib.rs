@@ -8,6 +8,7 @@
 //! language-specific heap layout.
 mod convert;
 pub mod haxe;
+pub mod haxe_js;
 pub mod idl;
 pub mod wire;
 
@@ -17,6 +18,13 @@ pub const GPU_API: &str = include_str!("../../../api/gpu.api.rs");
 pub const WEBGPU_IDL: &str = include_str!("../../../api/spec/webgpu.idl");
 /// The small canvas surface appended to WebGPU for browser presentation.
 pub const CANVAS_IDL: &str = include_str!("../../../api/spec/canvas.idl");
+
+/// The browser wire schema: WebGPU plus the small OffscreenCanvas surface
+/// used to size the presentation target. Runtime adapters should use this
+/// whenever they generate the browser agent and guest encoder together.
+pub fn browser_idl() -> String {
+    format!("{WEBGPU_IDL}\n{CANVAS_IDL}")
+}
 
 /// The canonical declaration with wgpu's native feature catalog appended.
 /// Keeping this here makes every runtime emitter follow the exact wgpu version
@@ -2089,13 +2097,42 @@ pub fn web_backend(
     webidl: &str,
     implemented: &str,
 ) -> Result<String, String> {
-    let (_, backend_fns, plugin) = generate_parts(
+    web_backend_for(
         namespace,
         declaration,
         webidl,
+        implemented,
         RustTarget::Caribou,
-        &HashSet::new(),
-    )?;
+    )
+}
+
+/// Generate the partial browser backend for a HashLink adapter. This uses
+/// HashLink's resource wrappers and ABI carriers while sharing the same
+/// WebGPU implementation and unavailable-operation fallbacks as Caribou.
+pub fn hashlink_web_backend(
+    namespace: &str,
+    declaration: &str,
+    webidl: &str,
+    implemented: &str,
+) -> Result<String, String> {
+    web_backend_for(
+        namespace,
+        declaration,
+        webidl,
+        implemented,
+        RustTarget::HashLink,
+    )
+}
+
+fn web_backend_for(
+    namespace: &str,
+    declaration: &str,
+    webidl: &str,
+    implemented: &str,
+    target: RustTarget,
+) -> Result<String, String> {
+    let (_, backend_fns, plugin) =
+        generate_parts(namespace, declaration, webidl, target, &HashSet::new())?;
     let file = syn::parse_file(implemented).map_err(error)?;
     let defined: HashSet<String> = file
         .items
@@ -2128,7 +2165,7 @@ pub fn web_backend(
             let message = format!("{namespace}: `{name}` is not available on the web");
             out.extend(quote! {
                 pub unsafe fn #name(#(_: #params),*) #ret {
-                    caribou_abi::host::raise(caribou_abi::ErrorKind::Runtime, #message);
+                    crate::runtime::host::raise(crate::runtime::ErrorKind::Runtime, #message);
                     #fallback
                 }
             });

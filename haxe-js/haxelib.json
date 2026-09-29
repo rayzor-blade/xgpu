@@ -1,0 +1,9 @@
+{
+  "name": "xgpu-js",
+  "url": "https://github.com/rayzor-blade/xgpu",
+  "license": "MIT",
+  "tags": ["webgpu", "gpu", "javascript", "extern"],
+  "description": "Generated Haxe JavaScript externs for xgpu's pinned WebGPU IDL",
+  "version": "0.1.0",
+  "classPath": "src"
+}
