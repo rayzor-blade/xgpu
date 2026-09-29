@@ -52,7 +52,8 @@ jobs:
           test -f generated/ash/gpu/GpuDevice.hx
           test -f generated/rayzor/rayzor/gpu/GpuDevice.hx
           test -f generated/javascript/gpu/js/GPUDevice.hx
-          diff -ru haxe-js/src generated/javascript
+          git diff --no-index --ignore-space-at-eol --exit-code -- \
+            haxe-js/src generated/javascript
       - name: Stage release bundle
         shell: bash
         run: |
