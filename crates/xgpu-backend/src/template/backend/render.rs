@@ -25,8 +25,8 @@ pub(super) struct Stage {
 impl Stage {
     pub(super) fn of(
         module: i32,
-        entry: &Option<caribou_abi::Rooted<Text>>,
-        constants: &[(caribou_abi::Rooted<Text>, f64)],
+        entry: &Option<Rooted<Text>>,
+        constants: &[(Rooted<Text>, f64)],
     ) -> Result<Stage, String> {
         Ok(Stage {
             module: SHADERS
@@ -72,7 +72,7 @@ pub(super) fn pipeline_layout(
         .transpose()
 }
 
-pub(super) fn label(label: &Option<caribou_abi::Rooted<Text>>) -> Option<String> {
+pub(super) fn label(label: &Option<Rooted<Text>>) -> Option<String> {
     label.as_ref().map(|text| text.get().as_str().to_owned())
 }
 

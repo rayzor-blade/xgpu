@@ -56,7 +56,7 @@ pub unsafe fn error_scope_pop(device: i32) -> Future<crate::GpuError> {
     let completion = Rooted::new(future);
     spawn_gpu(async move {
         let Some(error) = popped.await else {
-            completion.get().resolve(caribou_abi::Value::null());
+            completion.get().resolve(Value::null());
             return;
         };
         let filter = match error {

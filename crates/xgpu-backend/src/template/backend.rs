@@ -17,7 +17,7 @@ use crate::{
     GpuBufferDescriptor, GpuDeviceDescriptor, GpuPipelineLayoutDescriptor, GpuSamplerDescriptor,
     GpuTextureDescriptor, GpuTextureViewDescriptor,
 };
-use caribou_abi::{Buffer, BufferMut, ErrorKind, Future, Rooted, Text, Value, host};
+use crate::runtime::{Buffer, BufferMut, ErrorKind, Future, Rooted, Text, Value, host};
 
 /// A device and the queue that came back with it.
 struct DeviceEntry {
@@ -661,7 +661,7 @@ pub unsafe fn device_destroy(device: i32) {
 
 pub unsafe fn buffer_create(device: i32, descriptor: &GpuBufferDescriptor) -> i32 {
     let entry = find!(DEVICES, device, 0);
-    let label = descriptor.label.as_ref().map(caribou_abi::Rooted::get);
+    let label = descriptor.label.as_ref().map(Rooted::get);
     let buffer = entry.device.create_buffer(&wgpu::BufferDescriptor {
         label: label.as_ref().map(Text::as_str),
         size: descriptor.size.max(0) as u64,
@@ -999,7 +999,7 @@ pub unsafe fn bind_group_layout_create(
         Ok(entries) => entries,
         Err(message) => return refuse(&message),
     };
-    let label = descriptor.label.as_ref().map(caribou_abi::Rooted::get);
+    let label = descriptor.label.as_ref().map(Rooted::get);
     let layout = entry
         .device
         .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1033,7 +1033,7 @@ pub unsafe fn pipeline_layout_create(device: i32, descriptor: &GpuPipelineLayout
     };
     let borrowed: Vec<Option<&wgpu::BindGroupLayout>> =
         layouts.iter().map(|layout| layout.as_deref()).collect();
-    let label = descriptor.label.as_ref().map(caribou_abi::Rooted::get);
+    let label = descriptor.label.as_ref().map(Rooted::get);
     let layout = entry
         .device
         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1264,7 +1264,7 @@ pub unsafe fn bind_group_create_with(device: i32, descriptor: &GpuBindGroupDescr
             },
         })
         .collect();
-    let label = descriptor.label.as_ref().map(caribou_abi::Rooted::get);
+    let label = descriptor.label.as_ref().map(Rooted::get);
     let group = entry.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: label.as_ref().map(Text::as_str),
         layout: &layout,
@@ -1770,7 +1770,7 @@ fn texture_dimension(value: i32) -> wgpu::TextureDimension {
 
 pub unsafe fn texture_create(device: i32, descriptor: &GpuTextureDescriptor) -> i32 {
     let entry = find!(DEVICES, device, 0);
-    let label = descriptor.label.as_ref().map(caribou_abi::Rooted::get);
+    let label = descriptor.label.as_ref().map(Rooted::get);
     assert!(
         descriptor.textureBindingViewDimension.is_none(),
         "texture binding view dimensions are not supported by this wgpu version"
@@ -1820,8 +1820,8 @@ fn texture_aspect(value: i32) -> wgpu::TextureAspect {
 
 pub unsafe fn texture_view(texture: i32, descriptor: &GpuTextureViewDescriptor) -> i32 {
     let texture = find!(TEXTURES, texture, 0);
-    let label = descriptor.label.as_ref().map(caribou_abi::Rooted::get);
-    if let Some(swizzle) = descriptor.swizzle.as_ref().map(caribou_abi::Rooted::get) {
+    let label = descriptor.label.as_ref().map(Rooted::get);
+    if let Some(swizzle) = descriptor.swizzle.as_ref().map(Rooted::get) {
         assert_eq!(
             swizzle.as_str(),
             "rgba",
@@ -2178,7 +2178,7 @@ fn border_color(value: i32) -> wgpu::SamplerBorderColor {
 
 pub unsafe fn sampler_create(device: i32, descriptor: &GpuSamplerDescriptor) -> i32 {
     let entry = find!(DEVICES, device, 0);
-    let label = descriptor.label.as_ref().map(caribou_abi::Rooted::get);
+    let label = descriptor.label.as_ref().map(Rooted::get);
     let sampler = entry.device.create_sampler(&wgpu::SamplerDescriptor {
         label: label.as_ref().map(Text::as_str),
         address_mode_u: sampler_address(descriptor.addressModeU.unwrap_or(0)),

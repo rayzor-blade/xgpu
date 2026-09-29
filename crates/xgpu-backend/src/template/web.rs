@@ -15,7 +15,7 @@
 use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
 use std::sync::{LazyLock, Mutex};
 
-use caribou_abi::{Buffer, BufferMut, ErrorKind, Future, Rooted, Text, Value, host};
+use crate::runtime::{Buffer, BufferMut, ErrorKind, Future, Rooted, Text, Value, host};
 
 use crate::handles::{Slab, kind_of};
 use crate::types::Kind;

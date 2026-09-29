@@ -1,53 +1,59 @@
+<p align="center">
+  <img src="assets/xgpu-logo.png" alt="xgpu" width="320">
+</p>
+
 # xgpu
 
-`xgpu` is the shared wgpu implementation and binding source for Caribou, Ash,
-and Rayzor. It keeps the public namespace `gpu`; WebGPU's IDL supplies the
-portable starting point, while `gpu.api.rs` adds native wgpu capabilities such
-as surfaces, backend selection, pipeline caches, mesh shaders, ray tracing,
-and passthrough shaders.
+xgpu gives Caribou, Ash, and Rayzor one `gpu` API backed by wgpu. It starts
+with portable WebGPU and also exposes native capabilities such as surfaces,
+backend selection, pipeline caches, mesh shaders, ray tracing, and
+passthrough shaders.
 
-The repository has four layers:
+## When to use it
 
-- `api/` is the one typed API declaration and the vendored WebGPU/canvas IDL.
-- `xgpu-bindgen` parses that source and generates runtime bindings, WebGPU
-  enums and dictionaries, and the Rust/JavaScript browser wire.
-- `xgpu-core` owns runtime-neutral resource kinds and generational handle
-  storage. GPU objects remain in Rust; language runtimes exchange small typed
-  handles rather than copying wgpu objects.
-- `adapters/caribou` is the complete native and browser-agent implementation
-  extracted from Caribou. Its text, byte-buffer, error, root, and future code
-  is the Caribou adapter around the shared API and resource core.
+Use xgpu when you are building a runtime adapter or native library and want:
 
-Caribou bindings are generated implicitly by the adapter's build script. Ash
-and Rayzor can generate conventional Haxe externs from exactly the same API:
+- the same GPU API and enum values across supported Haxe runtimes;
+- generated bindings from a pinned WebGPU IDL instead of maintaining externs
+  by hand;
+- native wgpu features without giving up a future browser/Wasm path; or
+- small typed handles at the language boundary instead of copied GPU objects.
+
+Application developers normally use their runtime's xgpu adapter. They do not
+need to call the generator or depend on xgpu's internal crates directly.
+
+## Runtime support
+
+| Runtime | What is ready | Use it through |
+|---|---|---|
+| Caribou | Native plugin, generated language classes, and browser-agent wire | `caribou-gpu` |
+| Ash / HashLink | Conventional Haxe extern generation | `xgpu-haxe ash`; native adapter is in progress |
+| Rayzor | Conventional Haxe extern generation | `xgpu-haxe rayzor`; native adapter is in progress |
+
+The public namespace is `gpu` on every runtime. A runtime adapter may have a
+different native library name, but application code keeps the same GPU class
+names.
+
+## Generate Haxe externs
+
+Runtime maintainers can generate the full API from the repository root:
 
 ```sh
 cargo run -p xgpu-bindgen --bin xgpu-haxe -- ash path/to/generated
 cargo run -p xgpu-bindgen --bin xgpu-haxe -- rayzor path/to/generated
 ```
 
-Promise results map to each runtime's native future type. Caribou uses
-`caribou.Future<T>` and Rayzor uses `rayzor.concurrent.Future<T>`. The HashLink
-emitter targets `ash.concurrent.Future<T>`; Ash still needs the externally
-completable future ABI before asynchronous methods can link. The synchronous
-surface and generated extern catalog do not depend on that work.
+Promise-returning methods map to the runtime's Future type. Ash and Rayzor
+still need their native completion bridges before their asynchronous GPU
+adapters are complete.
 
-Runtime adapters follow one symbol convention generated alongside the Haxe
-surface: HashLink loads `gpu_*` methods from the `xgpu` HDLL, and Rayzor loads
-`xgpu_gpu_*` methods from its package. Adding an API member therefore updates
-the Caribou plugin and both conventional extern sets from one declaration.
+## Versioning
 
-The HashLink/Ash adapter is built on
-[`hl_abi`](https://github.com/rayzor-blade/hl_abi). That keeps native HDLL and
-wasm side-module layouts, allocation, roots, strings, bytes, objects and
-`DEFINE_PRIM` resolvers identical to other Ash libraries without linking a
-second copy of the Ash runtime into the plugin.
+xgpu is currently consumed by pinned Git revisions. Pin one revision for the
+generator, core, and backend source so the declared API and backend stay in
+step.
 
-## Development
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the repository layout, binding
+pipeline, adapter rules, and validation commands.
 
-```sh
-cargo test -p xgpu-bindgen -p xgpu-core
-cargo check -p xgpu-caribou
-```
-
-The implementation began from hlwgpu; see `LICENSE.hlwgpu`.
+xgpu began from hlwgpu; see [LICENSE.hlwgpu](LICENSE.hlwgpu).

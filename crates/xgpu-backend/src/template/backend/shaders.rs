@@ -34,7 +34,7 @@ pub unsafe fn shader_create_with(device: i32, d: &GpuShaderModuleDescriptor) -> 
         return refuse(&format!("turning off a runtime check {UNTRUSTED}"));
     }
     let code = d.code.get();
-    let label = d.label.as_ref().map(caribou_abi::Rooted::get);
+    let label = d.label.as_ref().map(Rooted::get);
     let descriptor = wgpu::ShaderModuleDescriptor {
         label: label.as_ref().map(Text::as_str),
         source: wgpu::ShaderSource::Wgsl(code.as_str().into()),
@@ -70,14 +70,14 @@ pub unsafe fn shader_create_passthrough(device: i32, d: &GpuPassthroughShaderDes
     if !entry.trusted_shaders {
         return refuse(&format!("a passthrough shader {UNTRUSTED}"));
     }
-    let bytes = |b: &Option<caribou_abi::Rooted<Buffer>>| {
+    let bytes = |b: &Option<Rooted<Buffer>>| {
         b.as_ref().map(|b| {
             let buffer = b.get();
             unsafe { buffer.as_slice() }.to_vec()
         })
     };
     let text =
-        |t: &Option<caribou_abi::Rooted<Text>>| t.as_ref().map(|t| t.get().as_str().to_owned());
+        |t: &Option<Rooted<Text>>| t.as_ref().map(|t| t.get().as_str().to_owned());
     let spirv = match bytes(&d.spirv).map(|b| words(&b)).transpose() {
         Ok(spirv) => spirv,
         Err(message) => return refuse(&message),
@@ -114,7 +114,7 @@ pub unsafe fn shader_create_passthrough(device: i32, d: &GpuPassthroughShaderDes
         Ok(entry_points) => entry_points,
         Err(message) => return refuse(&message),
     };
-    let label = d.label.as_ref().map(caribou_abi::Rooted::get);
+    let label = d.label.as_ref().map(Rooted::get);
     let descriptor = wgpu::ShaderModuleDescriptorPassthrough {
         label: label.as_ref().map(Text::as_str),
         entry_points: Cow::Owned(entry_points),

@@ -86,7 +86,7 @@ pub unsafe fn blas_create(device: i32, d: &GpuBlasDescriptor) -> i32 {
         Ok(sizes) => sizes,
         Err(message) => return refuse(&message),
     };
-    let label = d.label.as_ref().map(caribou_abi::Rooted::get);
+    let label = d.label.as_ref().map(Rooted::get);
     let blas = entry.device.create_blas(
         &wgpu::CreateBlasDescriptor {
             label: label.as_ref().map(Text::as_str),
@@ -148,7 +148,7 @@ pub unsafe fn tlas_create(device: i32, d: &GpuTlasDescriptor) -> i32 {
         Ok(max) => max,
         Err(message) => return refuse(&message),
     };
-    let label = d.label.as_ref().map(caribou_abi::Rooted::get);
+    let label = d.label.as_ref().map(Rooted::get);
     let tlas = entry.device.create_tlas(&wgpu::CreateTlasDescriptor {
         label: label.as_ref().map(Text::as_str),
         max_instances,

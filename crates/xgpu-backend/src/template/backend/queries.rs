@@ -29,7 +29,7 @@ pub unsafe fn query_set_create(device: i32, descriptor: &GpuQuerySetDescriptor) 
         }
         _ => return refuse("unknown query type"),
     };
-    let label = descriptor.label.as_ref().map(caribou_abi::Rooted::get);
+    let label = descriptor.label.as_ref().map(Rooted::get);
     let set = entry.device.create_query_set(&wgpu::QuerySetDescriptor {
         label: label.as_ref().map(Text::as_str),
         ty,

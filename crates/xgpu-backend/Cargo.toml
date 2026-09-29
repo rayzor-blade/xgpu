@@ -1,0 +1,9 @@
+[package]
+name = "xgpu-backend"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Shared native and browser GPU backend source for xgpu adapters"
+
+[dependencies]

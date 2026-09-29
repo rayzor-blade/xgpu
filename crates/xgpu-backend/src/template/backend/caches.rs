@@ -17,7 +17,7 @@ pub unsafe fn pipeline_cache_create(device: i32, d: &GpuPipelineCacheDescriptor)
         let buffer = b.get();
         unsafe { buffer.as_slice() }.to_vec()
     });
-    let label = d.label.as_ref().map(caribou_abi::Rooted::get);
+    let label = d.label.as_ref().map(Rooted::get);
     // Without data there is nothing to trust. With it, the device's
     // pipelineCacheData: the program vouches that the bytes are ones
     // getData returned.
