@@ -33,13 +33,26 @@ const MODULES: &[(&str, &str)] = &[
     ("surfaces", include_str!("template/backend/surfaces.rs")),
 ];
 
+fn include_source(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| {
+            line.strip_prefix("//!")
+                .map_or(line.to_owned(), |doc| format!("//{doc}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
 /// Write the backend bundle beneath `out`, returning its main source path.
 pub fn install(out: impl AsRef<Path>) -> io::Result<std::path::PathBuf> {
     let root = out.as_ref().join("xgpu_backend");
     let modules = root.join("backend");
     std::fs::create_dir_all(&modules)?;
 
-    let mut backend = BACKEND.replace("#![allow(clippy::too_many_arguments)]\n", "");
+    let mut backend =
+        include_source(BACKEND).replace("#![allow(clippy::too_many_arguments)]\n", "");
     for (name, source) in MODULES {
         let declaration = format!("mod {name};");
         let included = format!(
@@ -52,11 +65,11 @@ pub fn install(out: impl AsRef<Path>) -> io::Result<std::path::PathBuf> {
             ));
         }
         backend = backend.replace(&declaration, &included);
-        std::fs::write(modules.join(format!("{name}.rs")), source)?;
+        std::fs::write(modules.join(format!("{name}.rs")), include_source(source))?;
     }
     let main = root.join("backend.rs");
     std::fs::write(&main, backend)?;
-    std::fs::write(root.join("web.rs"), WEB)?;
+    std::fs::write(root.join("web.rs"), include_source(WEB))?;
     Ok(main)
 }
 
