@@ -27,25 +27,12 @@ need to call the generator or depend on xgpu's internal crates directly.
 | Runtime | What is ready | Use it through |
 |---|---|---|
 | Caribou | Native plugin, generated language classes, and browser-agent wire | `caribou-gpu` |
-| Ash / HashLink | Conventional Haxe extern generation | `xgpu-haxe ash`; native adapter is in progress |
-| Rayzor | Conventional Haxe extern generation | `xgpu-haxe rayzor`; native adapter is in progress |
+| Ash / HashLink | Runtime integration is in progress | No application package yet |
+| Rayzor | Runtime integration is in progress | No application package yet |
 
 The public namespace is `gpu` on every runtime. A runtime adapter may have a
 different native library name, but application code keeps the same GPU class
 names.
-
-## Generate Haxe externs
-
-Runtime maintainers can generate the full API from the repository root:
-
-```sh
-cargo run -p xgpu-bindgen --bin xgpu-haxe -- ash path/to/generated
-cargo run -p xgpu-bindgen --bin xgpu-haxe -- rayzor path/to/generated
-```
-
-Promise-returning methods map to the runtime's Future type. Ash and Rayzor
-still need their native completion bridges before their asynchronous GPU
-adapters are complete.
 
 ## Versioning
 

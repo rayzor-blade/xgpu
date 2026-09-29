@@ -54,6 +54,11 @@ cargo run -p xgpu-bindgen --bin xgpu-haxe -- ash /tmp/xgpu-ash
 cargo run -p xgpu-bindgen --bin xgpu-haxe -- rayzor /tmp/xgpu-rayzor
 ```
 
+Generated externs are validation output until their runtime adapter is ready.
+Never release them alone: the Ash tree ships in the same `xgpu-ash` bundle as
+`xgpu.hdll`, and the Rayzor tree is embedded in `xgpu.rpkg` with its native
+package. The release generator artifacts contain only `xgpu-haxe`.
+
 Caribou owns its runtime adapter in `caribou/plugins/cb_gpu`. From a sibling
 Caribou checkout, validate the plugin descriptor and fixture build:
 

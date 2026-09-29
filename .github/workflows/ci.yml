@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace --locked
+
+  release-binaries:
+    name: Release binary (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux-x86_64
+            executable: xgpu-haxe
+          - runner: windows-latest
+            platform: windows-x86_64
+            executable: xgpu-haxe.exe
+          - runner: macos-15
+            platform: macos-aarch64
+            executable: xgpu-haxe
+          - runner: macos-15-intel
+            platform: macos-x86_64
+            executable: xgpu-haxe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release generator
+        run: cargo build --release --locked -p xgpu-bindgen --bin xgpu-haxe
+      - name: Generate Ash and Rayzor externs
+        shell: bash
+        run: |
+          target/release/${{ matrix.executable }} ash generated/ash
+          target/release/${{ matrix.executable }} rayzor generated/rayzor
+          test -f generated/ash/gpu/GpuDevice.hx
+          test -f generated/rayzor/gpu/GpuDevice.hx
+      - name: Stage release bundle
+        shell: bash
+        run: |
+          mkdir -p dist/xgpu/bin/${{ matrix.platform }}
+          cp target/release/${{ matrix.executable }} dist/xgpu/bin/${{ matrix.platform }}/
+          cp README.md LICENSE LICENSE.hlwgpu dist/xgpu/
+          # Runtime externs deliberately stay out of this generator bundle.
+          # Ash ships them with xgpu.hdll; Rayzor ships them inside xgpu.rpkg.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xgpu-release-${{ matrix.platform }}
+          path: dist/xgpu
+          if-no-files-found: error
