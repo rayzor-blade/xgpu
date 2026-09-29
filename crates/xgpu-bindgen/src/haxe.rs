@@ -462,7 +462,7 @@ fn hashlink_resource(namespace: &str, name: &str, item: &syn::ItemTrait) -> Resu
             ),
             Some("Buffer") => format!("return XgpuBytes.take({call})"),
             _ if matches!(&ret_ty, Type::Tuple(tuple) if tuple.elems.is_empty()) => {
-                format!("{call}")
+                call.to_string()
             }
             _ => format!("return {call}"),
         };
