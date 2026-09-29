@@ -101,6 +101,10 @@ xgpu is currently consumed by pinned Git revisions. Pin one revision for the
 generator, core, and backend source so the declared API and backend stay in
 step.
 
+Successful `main` builds publish the generator binaries and `xgpu-js` haxelib
+under the moving `nightly` release. A `v*` tag publishes the same tested
+archives as a versioned release.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the repository layout, binding
 pipeline, adapter rules, and validation commands.
 
