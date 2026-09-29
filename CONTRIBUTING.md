@@ -63,6 +63,25 @@ Ash's `ash_future_abi`; Rayzor adapters use `rayzor.concurrent.Future<T>`.
 Runtime adapters own the conversion from xgpu's resource handles to each
 carrier's resolved value.
 
+## Wasm adapter boundary
+
+The generated wire has two reusable pieces: Rust encoding for the guest and an
+ES module that serves the mailbox around browser objects. It is deliberately
+not a complete browser harness. Each runtime adapter packages that service and
+provides the startup shim expected by its host runtime.
+
+Caribou stages an adapter entry module and asks `host::agent(name, address)` to
+start it. Ash provides the same generic mechanism through
+`ash_host_agent(name, name_len, address)`. Both hosts import the named shim on
+the page thread and call `start({ memory, address, canvas })`; the shim may then
+create the worker that imports xgpu's service. Rayzor must provide an equivalent
+hook for its wasm target.
+
+Keep runtime-specific wasm loading, Worker creation, side-module discovery,
+COOP/COEP serving, canvas transfer, and Future scheduling out of xgpu. Tests may
+construct a minimal harness to exercise the protocol, but generated artifacts
+must remain host-neutral.
+
 ## Validation
 
 Run the generator and core tests after changing the API, IDL, wire, or handle

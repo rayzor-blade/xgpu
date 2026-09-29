@@ -27,6 +27,12 @@
 //! The program hands batches of commands to the agent through a mailbox in
 //! its memory, which the agent serves; the plugin's `Mailbox` gives the
 //! layout. After the IDL's operations comes one that forgets a handle.
+//!
+//! This module generates the guest wire and the worker-side service. It does
+//! not generate a page, instantiate a wasm module, create a Worker, or decide
+//! how a canvas is transferred. The consuming runtime owns that harness and
+//! starts the adapter's service with shared memory, a mailbox address, and
+//! any browser objects the API needs.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -37,7 +43,7 @@ use crate::idl::{Int, Model, Operation, Ty};
 pub struct Wire {
     /// Rust, for a plugin to `include!` inside a module of its own.
     pub rust: String,
-    /// An ES module the agent imports.
+    /// The worker-side ES module a runtime-owned harness starts.
     pub js: String,
 }
 
@@ -1203,24 +1209,18 @@ mod tests {
             .iter()
             .find(|i| i.name == "Element")
             .unwrap();
-        assert!(
-            element
-                .operations
-                .iter()
-                .any(|o| o.name == "requestFullscreen")
-        );
-        assert!(
-            element
-                .operations
-                .iter()
-                .any(|o| o.name == "requestPointerLock")
-        );
+        assert!(element
+            .operations
+            .iter()
+            .any(|o| o.name == "requestFullscreen"));
+        assert!(element
+            .operations
+            .iter()
+            .any(|o| o.name == "requestPointerLock"));
         let wire = wire(idl).unwrap();
-        assert!(
-            wire.rust.contains(
-                "pub fn offscreen_canvas_set_width(&mut self, this: Handle, value: &u64)"
-            )
-        );
+        assert!(wire
+            .rust
+            .contains("pub fn offscreen_canvas_set_width(&mut self, this: Handle, value: &u64)"));
         assert!(wire.js.contains("(self.title = a0)"));
     }
 
@@ -1231,5 +1231,10 @@ mod tests {
         assert!(wire.rust.contains("pub fn gpu_request_adapter(&mut self, this: Handle, result: Handle, reply: u32, options: &Option<GPURequestAdapterOptions>)"));
         assert!(wire.js.contains("self.createBuffer(a0)"));
         assert!(wire.js.contains("self.requestAdapter(a0).then("));
+        // xgpu supplies the protocol service; Caribou, Ash, Rayzor, or
+        // another runtime supplies the browser and Worker harness.
+        assert!(!wire.js.contains("new Worker"));
+        assert!(!wire.js.contains("WebAssembly.instantiate"));
+        assert!(!wire.js.contains("document."));
     }
 }

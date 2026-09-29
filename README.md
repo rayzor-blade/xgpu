@@ -41,6 +41,22 @@ in `rayzor-gpu.rpkg` beside the generated portable surface. Create them over an
 xgpu device with `GPUCompute.fromDevice(device)` when both APIs must share the
 same device, queue, and `GpuBuffer` objects.
 
+## Wasm host contract
+
+xgpu generates the guest-side command wire and the worker-side JavaScript
+service for browser APIs. The consuming runtime provides the harness around
+that service. It must:
+
+- run a threaded wasm build over shared `WebAssembly.Memory`;
+- receive the adapter's request to start its browser service;
+- stage and import the adapter's shim beside the program;
+- start that shim with `{ memory, address, canvas }`; and
+- serve the page with the isolation headers required by `SharedArrayBuffer`.
+
+Caribou implements this through `host::agent`; Ash exposes the equivalent
+`ash_host_agent` hook. xgpu does not own either runtime's page, wasm loader,
+Worker lifecycle, side-module loader, or canvas policy.
+
 ## Versioning
 
 xgpu is currently consumed by pinned Git revisions. Pin one revision for the

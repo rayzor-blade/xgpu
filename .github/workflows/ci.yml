@@ -12,7 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # The wire mailbox test compiles a shared-memory WASI guest and uses
+      # the still-unstable wasm atomic wait intrinsic, matching Caribou CI.
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-wasip1-threads
       - run: cargo test --workspace --locked
 
   release-binaries:

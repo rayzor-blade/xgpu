@@ -92,11 +92,11 @@ pub extern "C" fn session() -> u64 {
 }
 "#;
 
-/// The page's side: the program's thread, and a worker holding a GPU that
-/// records its calls. `size` answers, `getMappedRange` gives four bytes, or
+/// A test-only runtime harness: the program's thread and a worker holding
+/// a GPU that records its calls. `size` answers, `getMappedRange` gives four bytes, or
 /// throws past the end, and the rest
 /// make objects that record in turn.
-const HARNESS: &str = r#"
+const TEST_HARNESS: &str = r#"
 import { readFileSync } from "node:fs";
 import { once } from "node:events";
 import { Worker } from "node:worker_threads";
@@ -158,13 +158,13 @@ serve(wire, workerData.address);
 fn a_program_hands_batches_to_its_agent_and_waits_for_replies() {
     let idl = xgpu_bindgen::WEBGPU_IDL;
     let wire = xgpu_bindgen::wire::wire(idl).unwrap();
-    let dir = std::env::temp_dir().join(format!("caribou-mailbox-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("xgpu-mailbox-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     for (name, text) in [
         ("gpu_wire.rs", wire.rust.as_str()),
         ("gpu_agent.mjs", &wire.js),
         ("program.rs", PROGRAM),
-        ("harness.mjs", HARNESS),
+        ("harness.mjs", TEST_HARNESS),
         ("agent.mjs", AGENT),
     ] {
         std::fs::write(dir.join(name), text).unwrap();
