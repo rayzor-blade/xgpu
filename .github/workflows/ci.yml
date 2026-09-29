@@ -45,7 +45,7 @@ jobs:
           target/release/${{ matrix.executable }} ash generated/ash
           target/release/${{ matrix.executable }} rayzor generated/rayzor
           test -f generated/ash/gpu/GpuDevice.hx
-          test -f generated/rayzor/gpu/GpuDevice.hx
+          test -f generated/rayzor/rayzor/gpu/GpuDevice.hx
       - name: Stage release bundle
         shell: bash
         run: |

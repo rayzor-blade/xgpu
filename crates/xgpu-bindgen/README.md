@@ -4,18 +4,23 @@ Build-time generation from xgpu's typed GPU declaration and WebGPU IDL. The
 same source emits Caribou plugin wrappers, the browser wire, and conventional
 Haxe externs for HashLink/Ash and Rayzor.
 
-`generate(namespace, declaration, webidl)` returns Rust source to include
-from `OUT_DIR`. The namespace is a parameter, independent of the backend's
-crate name. Resource traits contain signatures annotated with
+`generate_caribou(namespace, declaration, webidl)` returns Caribou Rust source
+to include from `OUT_DIR`. `generate_rayzor(declaration, webidl)` emits the
+same typed model plus Rayzor method descriptors, runtime symbols, and C ABI
+wrappers. Those wrappers widen xgpu's `i32` values to Rayzor's `i64` `Int`
+slots, including on wasm where function signatures must match exactly.
+
+The namespace is independent of the backend's crate name. Resource traits contain signatures annotated with
 `#[native(function)]`; enum and constant declarations can import a named
 WebIDL declaration using `#[idl("Name")]`.
 
 Resource methods use explicit `this: &Resource` parameters. Supported carriers
-are Caribou `Text`, `Buffer`, `Future<T>`, `Enum<T>`, `Box<Resource>` results and
+are adapter `Text`, `Buffer`, `Future<T>`, `Enum<T>`, `Box<Resource>` results and
 borrowed resource parameters, plus numeric/boolean scalars. Backends receive integer
 resource handles and declared native enum codes. Generated objects use the
-normal `plugin!` class metadata and finalizers; the backend defines explicit
-native resource lifetime operations.
+normal runtime class metadata and finalizers; the backend defines explicit
+native resource lifetime operations. Rayzor adapters also provide `NativeEnum`
+and the runtime carriers consumed by the generated model.
 
 `Future<T>` is the shared eventual-result carrier. A backend creates one with
 `Future::new()`, roots it as `Rooted<Future<T>>` while work is outstanding, and

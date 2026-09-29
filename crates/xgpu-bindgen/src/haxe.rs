@@ -31,7 +31,14 @@ pub fn generate(
     runtime: Runtime,
 ) -> Result<Vec<File>, String> {
     let file = syn::parse_file(declaration).map_err(|e| e.to_string())?;
-    let (_, _, plugin) = super::generate_parts(namespace, declaration, webidl)?;
+    let schema_namespace = namespace.rsplit('.').next().unwrap_or(namespace);
+    let (_, _, plugin) = super::generate_parts(
+        schema_namespace,
+        declaration,
+        webidl,
+        super::RustTarget::Caribou,
+        &std::collections::HashSet::new(),
+    )?;
     let records: HashMap<_, _> = plugin
         .records
         .iter()
@@ -258,7 +265,7 @@ pub fn generate(
 
 fn source(namespace: &str, name: &str, body: String) -> File {
     File {
-        path: format!("{namespace}/{name}.hx"),
+        path: format!("{}/{name}.hx", namespace.replace('.', "/")),
         source: format!("package {namespace};\n\n{body}"),
     }
 }
@@ -273,7 +280,7 @@ fn method_line(runtime: Runtime, class: &str, method: &str, args: &str, ret: &st
 fn class_annotation(runtime: Runtime, namespace: &str, class: &str) -> String {
     match runtime {
         Runtime::HashLink => String::new(),
-        Runtime::Rayzor => format!("@:native(\"{namespace}::{class}\")\n"),
+        Runtime::Rayzor => format!("@:native(\"{}::{class}\")\n", namespace.replace('.', "::")),
     }
 }
 
@@ -285,7 +292,7 @@ fn native(runtime: Runtime, class: &str, method: &str) -> String {
     }
 }
 
-fn snake(name: &str) -> String {
+pub(crate) fn snake(name: &str) -> String {
     let mut out = String::new();
     for (i, c) in name.chars().enumerate() {
         if c.is_ascii_uppercase() && i != 0 {
@@ -397,7 +404,7 @@ mod tests {
             }
             trait GpuDevice { #[native(device_destroy)] fn destroy(this: &GpuDevice); }
         "#;
-        let rayzor = generate("gpu", api, "", Runtime::Rayzor).unwrap();
+        let rayzor = generate("rayzor.gpu", api, "", Runtime::Rayzor).unwrap();
         let adapter = &rayzor
             .iter()
             .find(|f| f.path.ends_with("GpuAdapter.hx"))
@@ -405,6 +412,9 @@ mod tests {
             .source;
         assert!(adapter.contains("rayzor.concurrent.Future<GpuDevice>"));
         assert!(adapter.contains("@:native(\"xgpu_gpu_adapter_request_device\")"));
+        assert!(adapter.contains("package rayzor.gpu;"));
+        assert!(adapter.contains("@:native(\"rayzor::gpu::GpuAdapter\")"));
+        assert!(rayzor.iter().all(|f| f.path.starts_with("rayzor/gpu/")));
 
         let ash = generate("gpu", api, "", Runtime::HashLink).unwrap();
         let adapter = &ash
@@ -427,6 +437,10 @@ mod tests {
                 .unwrap();
             assert!(adapter.source.contains("Future<GpuDevice>"));
             assert!(files.iter().any(|f| f.path.ends_with("TextureFormat.hx")));
+            if runtime == Runtime::Rayzor {
+                assert!(adapter.path.starts_with("rayzor/gpu/"));
+                assert!(adapter.source.contains("package rayzor.gpu;"));
+            }
         }
     }
 }

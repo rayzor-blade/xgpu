@@ -28,11 +28,18 @@ need to call the generator or depend on xgpu's internal crates directly.
 |---|---|---|
 | Caribou | Native plugin, generated language classes, and browser-agent wire | `caribou-gpu` |
 | Ash / HashLink | Runtime integration is in progress | No application package yet |
-| Rayzor | Runtime integration is in progress | No application package yet |
+| Rayzor | Native adapter, generated externs, shared buffers, and Rayzor compute extensions | `rayzor-gpu.rpkg` |
 
-The public namespace is `gpu` on every runtime. A runtime adapter may have a
-different native library name, but application code keeps the same GPU class
-names.
+The API is named `gpu`. Caribou and Ash expose it as `gpu`; Rayzor keeps its
+established `rayzor.gpu` package and `rayzor-gpu.rpkg`. The generated GPU class
+names and behavior stay aligned across runtimes while each adapter follows its
+host's package convention.
+
+Rayzor adds its compiler-owned `@:shader` lowering, lazy tensor graphs, fused
+and quantized kernels, and Metal/CUDA policy to this API. Those extensions ship
+in `rayzor-gpu.rpkg` beside the generated portable surface. Create them over an
+xgpu device with `GPUCompute.fromDevice(device)` when both APIs must share the
+same device, queue, and `GpuBuffer` objects.
 
 ## Versioning
 

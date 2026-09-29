@@ -1,12 +1,12 @@
 //! Native GPU operations, adapted from hlwgpu (see LICENSE.hlwgpu).
 //!
-//! Uses Caribou Text and shared Buffer carriers, with typed generated objects.
-//! Nothing here is generated; `bindings` is the part that is.
+//! Uses its adapter's Text and Buffer carriers with typed generated objects.
+//! Nothing here is generated; the adapter bindings are the generated part.
 
 // gpu.api.rs names these operations and generates their typed ABI wrappers.
 #![allow(clippy::too_many_arguments)]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future as StdFuture;
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -91,6 +91,64 @@ slab!(VIEWS, wgpu::TextureView, Kind::View);
 slab!(SAMPLERS, wgpu::Sampler, Kind::Sampler);
 slab!(BINDGROUPS, wgpu::BindGroup, Kind::Bindgroup);
 slab!(ENCODERS, Encoder, Kind::Encoder);
+static BUFFER_CONTEXTS: LazyLock<Mutex<HashMap<i32, (wgpu::Device, wgpu::Queue)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Native resource access for runtime-owned GPU extensions.
+///
+/// Cloned wgpu handles retain the same resource identity. This lets a host's
+/// shader compiler or tensor engine build work over xgpu devices and buffers
+/// without exporting wgpu layouts through the language ABI.
+#[allow(dead_code)]
+pub mod extension {
+    use super::{BUFFER_CONTEXTS, BUFFERS, DEVICES, QUEUES};
+
+    /// Clone the native device behind a live xgpu device handle.
+    pub fn device(handle: i32) -> Option<wgpu::Device> {
+        DEVICES
+            .lock()
+            .unwrap()
+            .get(handle)
+            .map(|entry| entry.device.clone())
+    }
+
+    /// Clone the native queue behind a live xgpu queue handle.
+    pub fn queue(handle: i32) -> Option<wgpu::Queue> {
+        QUEUES
+            .lock()
+            .unwrap()
+            .get(handle)
+            .map(|queue| queue.as_ref().clone())
+    }
+
+    /// Clone the device and its queue from one xgpu device handle.
+    pub fn device_queue(handle: i32) -> Option<(wgpu::Device, wgpu::Queue)> {
+        let entry = DEVICES.lock().unwrap().get(handle)?;
+        let queue = queue(entry.queue)?;
+        Some((entry.device.clone(), queue))
+    }
+
+    /// Clone the native buffer behind a live xgpu buffer handle.
+    pub fn buffer(handle: i32) -> Option<wgpu::Buffer> {
+        BUFFERS
+            .lock()
+            .unwrap()
+            .get(handle)
+            .map(|buffer| buffer.as_ref().clone())
+    }
+
+    /// Clone a buffer and the xgpu device pair that created it.
+    pub fn buffer_context(handle: i32) -> Option<(wgpu::Buffer, wgpu::Device, wgpu::Queue)> {
+        let buffer = buffer(handle)?;
+        let context = BUFFER_CONTEXTS.lock().unwrap().get(&handle).cloned()?;
+        Some((buffer, context.0, context.1))
+    }
+
+    /// Register a buffer created by a runtime-owned GPU extension.
+    pub fn insert_buffer(buffer: wgpu::Buffer) -> i32 {
+        BUFFERS.lock().unwrap().put(buffer)
+    }
+}
 
 /// Looks a handle up and lets go of the slab before the object is used, so no
 /// two of these locks are ever held at once.
@@ -661,6 +719,7 @@ pub unsafe fn device_destroy(device: i32) {
 
 pub unsafe fn buffer_create(device: i32, descriptor: &GpuBufferDescriptor) -> i32 {
     let entry = find!(DEVICES, device, 0);
+    let queue = find!(QUEUES, entry.queue, 0);
     let label = descriptor.label.as_ref().map(Rooted::get);
     let buffer = entry.device.create_buffer(&wgpu::BufferDescriptor {
         label: label.as_ref().map(Text::as_str),
@@ -668,7 +727,14 @@ pub unsafe fn buffer_create(device: i32, descriptor: &GpuBufferDescriptor) -> i3
         usage: wgpu::BufferUsages::from_bits_truncate(descriptor.usage as u32),
         mapped_at_creation: descriptor.mappedAtCreation.unwrap_or(false),
     });
-    BUFFERS.lock().unwrap().put(buffer)
+    let handle = BUFFERS.lock().unwrap().put(buffer);
+    if handle != 0 {
+        BUFFER_CONTEXTS
+            .lock()
+            .unwrap()
+            .insert(handle, (entry.device.clone(), queue.as_ref().clone()));
+    }
+    handle
 }
 
 pub unsafe fn queue_write_buffer(queue: i32, buffer: i32, offset: i64, data: Buffer, len: i32) {
@@ -747,6 +813,7 @@ pub unsafe fn buffer_unmap(buffer: i32) {
 }
 
 pub unsafe fn buffer_destroy(buffer: i32) {
+    BUFFER_CONTEXTS.lock().unwrap().remove(&buffer);
     BUFFERS.lock().unwrap().remove(buffer);
 }
 

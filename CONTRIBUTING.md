@@ -33,6 +33,30 @@ Shared backend source uses the generated model at the adapter crate root and
 imports its carrier contract from `crate::runtime`. Do not introduce a direct
 dependency from that source to Caribou, HashLink, Ash, or Rayzor ABI types.
 
+Runtime-owned features extend the shared object model instead of creating a
+second GPU API. In Rayzor, `@:shader` lowering, lazy tensor graphs, fused and
+quantized kernels, and Metal/CUDA policy remain in the Rayzor compiler and
+`gpu` crate. The xgpu backend's `extension` module lends cloned wgpu device,
+queue, and buffer handles to that layer and accepts buffers it creates. This
+keeps render commands, generated compute commands, and Rayzor compute on one
+device and one `GpuBuffer` identity.
+
+The extension seam is native wgpu access for a runtime adapter, not a second
+language ABI. Compiler metadata and tensor semantics do not belong in xgpu's
+IDL or shared API declaration.
+
+An adapter may ask `generate_rayzor_with_resources` to provide a resource
+wrapper such as `GpuBuffer`. The generated API then adds portable methods to
+that wrapper and constructs it through `from_handle`; the adapter can retain
+its lazy graph metadata while the handle continues to name xgpu's native
+resource. Buffer/device associations are kept in a side table so the hot path
+still stores raw `wgpu::Buffer` values in xgpu's slab.
+
+`generate_rayzor` derives the native method table and runtime symbol list from
+the generated model. It emits ABI wrappers for Rayzor's `i64` `Int` convention,
+so adapters include those wrappers instead of registering the typed model
+methods directly. This keeps native and wasm function signatures consistent.
+
 HashLink/Ash adapters use `hl_abi` for allocation, roots, strings, bytes,
 objects, and `DEFINE_PRIM` exports. Rayzor adapters use
 `rayzor.concurrent.Future<T>` for Promise results. Both runtimes still need an

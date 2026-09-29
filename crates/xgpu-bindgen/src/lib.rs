@@ -32,7 +32,11 @@ pub fn gpu_api() -> String {
 
 /// Generate xgpu's complete conventional Haxe surface for one runtime.
 pub fn haxe(runtime: haxe::Runtime) -> Result<Vec<haxe::File>, String> {
-    haxe::generate("gpu", &gpu_api(), WEBGPU_IDL, runtime)
+    let namespace = match runtime {
+        haxe::Runtime::HashLink => "gpu",
+        haxe::Runtime::Rayzor => "rayzor.gpu",
+    };
+    haxe::generate(namespace, &gpu_api(), WEBGPU_IDL, runtime)
 }
 
 use proc_macro2::TokenStream;
@@ -608,10 +612,23 @@ fn scalar(ty: &Type) -> bool {
     })
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RustTarget {
+    Caribou,
+    Rayzor,
+}
+
+fn exported(_: RustTarget, _: &syn::Ident, _: &syn::Ident) -> TokenStream {
+    // Rayzor receives separate ABI-normalising wrappers. The typed model
+    // functions stay ordinary associated functions on every target.
+    TokenStream::new()
+}
+
 fn stored_value(
     ty: &Type,
     resources: &HashSet<String>,
     records: &HashSet<String>,
+    target: RustTarget,
 ) -> Result<(TokenStream, TokenStream, TokenStream), String> {
     if let Some(enumeration) = generic(ty, "Enum") {
         return Ok((
@@ -622,17 +639,27 @@ fn stored_value(
     }
     if scalar(ty) {
         if type_name(ty).as_deref() == Some("Text") {
+            let rooted = if target == RustTarget::Caribou {
+                quote!(caribou_abi::Rooted)
+            } else {
+                quote!(Rooted)
+            };
             return Ok((
-                quote!(caribou_abi::Rooted<Text>),
+                quote!(#rooted<Text>),
                 quote!(Text),
-                quote!(caribou_abi::Rooted::new(value)),
+                quote!(#rooted::new(value)),
             ));
         }
         if type_name(ty).as_deref() == Some("Buffer") {
+            let rooted = if target == RustTarget::Caribou {
+                quote!(caribou_abi::Rooted)
+            } else {
+                quote!(Rooted)
+            };
             return Ok((
-                quote!(caribou_abi::Rooted<Buffer>),
+                quote!(#rooted<Buffer>),
                 quote!(Buffer),
-                quote!(caribou_abi::Rooted::new(value)),
+                quote!(#rooted::new(value)),
             ));
         }
         return Ok((quote!(#ty), quote!(#ty), quote!(value)));
@@ -656,7 +683,44 @@ pub fn generate_caribou(
     declaration: &str,
     webidl: &str,
 ) -> Result<String, String> {
-    generate_parts(namespace, declaration, webidl).map(|(code, _, _)| code)
+    generate_parts(
+        namespace,
+        declaration,
+        webidl,
+        RustTarget::Caribou,
+        &HashSet::new(),
+    )
+    .map(|(code, _, _)| code)
+}
+
+/// Emit the runtime-neutral model and exported C symbols used by Rayzor's
+/// native package. The adapter supplies Text, Buffer, roots, futures, errors,
+/// and the generic Enum carrier; xgpu supplies the object model and backend.
+pub fn generate_rayzor(declaration: &str, webidl: &str) -> Result<String, String> {
+    generate_rayzor_with_resources(declaration, webidl, &[])
+}
+
+/// Generate Rayzor bindings while letting its adapter own selected resource
+/// wrappers. This is how runtime extensions attach metadata to an xgpu handle
+/// without creating a second language object for the same GPU resource.
+pub fn generate_rayzor_with_resources(
+    declaration: &str,
+    webidl: &str,
+    adapter_resources: &[&str],
+) -> Result<String, String> {
+    let adapter_resources = adapter_resources
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    let (model, _, _) = generate_parts(
+        "gpu",
+        declaration,
+        webidl,
+        RustTarget::Rayzor,
+        &adapter_resources,
+    )?;
+    let registration = rayzor_registration(&model)?;
+    Ok(format!("{model} {registration}"))
 }
 
 /// Compatibility spelling for existing Caribou build scripts.
@@ -674,10 +738,224 @@ struct BackendFn {
     fallback: TokenStream,
 }
 
+fn rayzor_abi_type(ty: &Type, result: bool) -> Result<u8, String> {
+    if matches!(ty, Type::Reference(_)) {
+        return Ok(3);
+    }
+    if let Type::Tuple(tuple) = ty
+        && tuple.elems.is_empty()
+    {
+        return Ok(0);
+    }
+    if generic(ty, "Box").is_some() || generic(ty, "Future").is_some() {
+        return Ok(3);
+    }
+    if generic(ty, "Enum").is_some() {
+        return Ok(1);
+    }
+    match type_name(ty).as_deref() {
+        Some("bool") => Ok(4),
+        Some("f32" | "f64") => Ok(2),
+        Some("i32" | "u32" | "i64" | "u64") => Ok(1),
+        Some("Text" | "Buffer" | "BufferMut" | "Future") => Ok(3),
+        Some(name) if result => Err(format!("unsupported Rayzor result type {name}")),
+        Some(name) => Err(format!("unsupported Rayzor parameter type {name}")),
+        None => Err("unsupported composite type in Rayzor ABI".into()),
+    }
+}
+
+fn rayzor_rust_type(ty: &Type, result: bool) -> Result<TokenStream, String> {
+    Ok(match rayzor_abi_type(ty, result)? {
+        0 => quote!(()),
+        1 => quote!(i64),
+        2 => quote!(f64),
+        3 => quote!(*mut u8),
+        4 => quote!(bool),
+        _ => unreachable!(),
+    })
+}
+
+fn rayzor_argument(name: &syn::Ident, ty: &Type) -> Result<TokenStream, String> {
+    if let Type::Reference(reference) = ty {
+        let inner = &reference.elem;
+        return Ok(if reference.mutability.is_some() {
+            quote!(unsafe { &mut *(#name as *mut #inner) })
+        } else {
+            quote!(unsafe { &*(#name as *const #inner) })
+        });
+    }
+    if generic(ty, "Box").is_some() {
+        return Err("Box parameters are not supported by the Rayzor ABI".into());
+    }
+    if generic(ty, "Enum").is_some() {
+        return Ok(quote!(unsafe { std::mem::transmute::<i64, #ty>(#name) }));
+    }
+    if generic(ty, "Future").is_some()
+        || matches!(
+            type_name(ty).as_deref(),
+            Some("Text" | "Buffer" | "BufferMut" | "Future")
+        )
+    {
+        return Ok(quote!(unsafe { std::mem::transmute::<*mut u8, #ty>(#name) }));
+    }
+    Ok(match type_name(ty).as_deref() {
+        Some("i32" | "u32" | "i64" | "u64") => quote!(#name as #ty),
+        Some("f32") => quote!(#name as f32),
+        Some("f64" | "bool") => quote!(#name),
+        Some(name) => return Err(format!("unsupported Rayzor argument type {name}")),
+        None => return Err("unsupported composite type in Rayzor ABI".into()),
+    })
+}
+
+fn rayzor_return(
+    call: TokenStream,
+    output: &ReturnType,
+) -> Result<(TokenStream, TokenStream), String> {
+    let ReturnType::Type(_, ty) = output else {
+        return Ok((quote!(), quote!({ #call; })));
+    };
+    let abi = rayzor_rust_type(ty, true)?;
+    let convert = if generic(ty, "Box").is_some() {
+        quote!(Box::into_raw(value) as *mut u8)
+    } else if generic(ty, "Enum").is_some() {
+        quote!(unsafe { std::mem::transmute::<#ty, i64>(value) })
+    } else if generic(ty, "Future").is_some()
+        || matches!(
+            type_name(ty).as_deref(),
+            Some("Text" | "Buffer" | "BufferMut" | "Future")
+        )
+    {
+        quote!(unsafe { std::mem::transmute::<#ty, *mut u8>(value) })
+    } else {
+        match type_name(ty).as_deref() {
+            Some("i32" | "u32" | "i64" | "u64") => quote!(value as i64),
+            Some("f32" | "f64") => quote!(value as f64),
+            Some("bool") => quote!(value),
+            Some(name) => return Err(format!("unsupported Rayzor result type {name}")),
+            None => return Err("unsupported composite result in Rayzor ABI".into()),
+        }
+    };
+    Ok((abi, quote!({ let value = #call; #convert })))
+}
+
+/// Describe every generated C export to Rayzor's compiler and return the same
+/// function pointers to its runtime linker. This is derived from the emitted
+/// model so the externs, method table and actual symbols cannot drift apart.
+fn rayzor_registration(model: &str) -> Result<String, String> {
+    let file = syn::parse_file(model).map_err(error)?;
+    let mut descriptors = TokenStream::new();
+    let mut symbols = TokenStream::new();
+    let mut wrappers = TokenStream::new();
+    let mut count = 0usize;
+    for item in file.items {
+        let Item::Impl(item) = item else { continue };
+        let Type::Path(class_path) = &*item.self_ty else {
+            continue;
+        };
+        let Some(class) = class_path.path.get_ident() else {
+            continue;
+        };
+        for member in item.items {
+            let syn::ImplItem::Fn(method) = member else {
+                continue;
+            };
+            if method
+                .sig
+                .abi
+                .as_ref()
+                .and_then(|abi| abi.name.as_ref())
+                .is_none_or(|name| name.value() != "C")
+            {
+                continue;
+            }
+            let symbol = format!(
+                "xgpu_{}_{}",
+                haxe::snake(&class.to_string()),
+                haxe::snake(&method.sig.ident.unraw().to_string())
+            );
+            let method_name = method.sig.ident.unraw().to_string();
+            let class_name = format!("rayzor::gpu::{class}");
+            let mut params = Vec::new();
+            let mut wrapper_params = Vec::new();
+            let mut wrapper_args = Vec::new();
+            let mut instance = false;
+            for (at, arg) in method.sig.inputs.iter().enumerate() {
+                let FnArg::Typed(arg) = arg else {
+                    return Err("generated Rayzor functions use typed parameters".into());
+                };
+                if at == 0 && matches!(&*arg.pat, syn::Pat::Ident(p) if p.ident == "this") {
+                    instance = true;
+                }
+                params.push(rayzor_abi_type(&arg.ty, false)?);
+                let name = quote::format_ident!("a{at}");
+                let ty = rayzor_rust_type(&arg.ty, false)?;
+                wrapper_params.push(quote!(#name: #ty));
+                wrapper_args.push(rayzor_argument(&name, &arg.ty)?);
+            }
+            if params.len() > 16 {
+                return Err(format!(
+                    "{class}.{method_name} has {} ABI parameters; Rayzor supports 16",
+                    params.len()
+                ));
+            }
+            let ret = match &method.sig.output {
+                ReturnType::Default => 0,
+                ReturnType::Type(_, ty) => rayzor_abi_type(ty, true)?,
+            };
+            let param_count = u8::try_from(params.len()).map_err(error)?;
+            let is_static = u8::from(!instance);
+            let mut padded = params;
+            padded.resize(16, 0);
+            let function = &method.sig.ident;
+            let wrapper = quote::format_ident!("__{symbol}");
+            let call = quote!(#class::#function(#(#wrapper_args),*));
+            let (wrapper_ret, wrapper_body) = rayzor_return(call, &method.sig.output)?;
+            let wrapper_output = if wrapper_ret.is_empty() {
+                quote!()
+            } else {
+                quote!(-> #wrapper_ret)
+            };
+            wrappers.extend(quote! {
+                #[unsafe(export_name = #symbol)]
+                pub extern "C" fn #wrapper(#(#wrapper_params),*) #wrapper_output #wrapper_body
+            });
+            descriptors.extend(quote! {
+                rayzor_plugin::NativeMethodDesc {
+                    symbol_name: #symbol.as_ptr(),
+                    symbol_name_len: #symbol.len(),
+                    class_name: #class_name.as_ptr(),
+                    class_name_len: #class_name.len(),
+                    method_name: #method_name.as_ptr(),
+                    method_name_len: #method_name.len(),
+                    is_static: #is_static,
+                    param_count: #param_count,
+                    return_type: #ret,
+                    param_types: [#(#padded),*],
+                },
+            });
+            symbols.extend(quote!((#symbol, #wrapper as *const u8),));
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return Err("Rayzor generation produced no exported methods".into());
+    }
+    Ok(quote! {
+        #wrappers
+        pub static XGPU_METHODS: &[rayzor_plugin::NativeMethodDesc] = &[#descriptors];
+        pub fn xgpu_runtime_symbols() -> Vec<(&'static str, *const u8)> {
+            vec![#symbols]
+        }
+    }
+    .to_string())
+}
+
 fn generate_parts(
     namespace: &str,
     declaration: &str,
     webidl: &str,
+    target: RustTarget,
+    adapter_resources: &HashSet<String>,
 ) -> Result<(String, Vec<BackendFn>, convert::Plugin), String> {
     ident(namespace)?;
     let mut backend_fns: Vec<BackendFn> = Vec::new();
@@ -837,7 +1115,7 @@ fn generate_parts(
                     {
                         return Err(format!("unknown enum in {name}::{variant}"));
                     }
-                    let (stored, _, _) = stored_value(ty, &resources, &records)?;
+                    let (stored, _, _) = stored_value(ty, &resources, &records, target)?;
                     stored_variants.push(quote!(#variant(#stored)));
                 }
                 output.extend(quote! {
@@ -924,9 +1202,28 @@ fn generate_parts(
                     .map(|(_, value)| proc_macro2::Literal::i32_unsuffixed(*value))
                     .collect();
                 let (first, rest) = ids.split_first().expect("a non-empty enum");
+                let derive = if target == RustTarget::Caribou {
+                    quote! {
+                        #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, caribou_abi::PluginEnum)]
+                        #[caribou(name = #schema)]
+                    }
+                } else {
+                    quote!(#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)])
+                };
+                let native_enum = if target == RustTarget::Rayzor {
+                    quote! {
+                        impl NativeEnum for #name {
+                            fn native(self) -> i32 { #name::native(self) }
+                            fn from_native(value: i32) -> Option<Self> {
+                                #name::from_native(value)
+                            }
+                        }
+                    }
+                } else {
+                    TokenStream::new()
+                };
                 output.extend(quote! {
-                    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, caribou_abi::PluginEnum)]
-                    #[caribou(name = #schema)]
+                    #derive
                     pub enum #name { #[default] #first, #(#rest),* }
                     impl #name {
                         pub fn native(self) -> i32 { match self { #(Self::#ids => #values),* } }
@@ -937,6 +1234,7 @@ fn generate_parts(
                             }
                         }
                     }
+                    #native_enum
                 });
                 exports.extend(quote!(enum #name;));
             }
@@ -988,7 +1286,8 @@ fn generate_parts(
                     if !seen.insert(field.to_string()) {
                         return Err(format!("duplicate constant {name}.{field}"));
                     }
-                    methods.extend(quote!(pub extern "C" fn #field() -> i32 { #value }));
+                    let export = exported(target, name, &field);
+                    methods.extend(quote!(#export pub extern "C" fn #field() -> i32 { #value }));
                     signatures.extend(quote!(fn #field() -> i32;));
                 }
                 output.extend(quote!(pub struct #name; impl #name { #methods }));
@@ -1083,9 +1382,9 @@ fn generate_parts(
                             }
                         }
                         let (stored_key, parameter_key, convert_key) =
-                            stored_value(&key_ty, &resources, &records)?;
+                            stored_value(&key_ty, &resources, &records, target)?;
                         let (stored_value_ty, parameter_value, convert_value) =
-                            stored_value(&value_ty, &resources, &records)?;
+                            stored_value(&value_ty, &resources, &records, target)?;
                         stored_fields.extend(
                             quote!(pub(crate) #field_name: Vec<(#stored_key, #stored_value_ty)>,),
                         );
@@ -1095,7 +1394,9 @@ fn generate_parts(
                         if !method_names.insert(add.to_string()) {
                             return Err(format!("generated method {class}.{add} is duplicated"));
                         }
+                        let export = exported(target, class, &add);
                         methods.extend(quote! {
+                            #export
                             pub extern "C" fn #add(
                                 this: &mut #class,
                                 key: #parameter_key,
@@ -1143,7 +1444,8 @@ fn generate_parts(
                             initial_values.push(quote!(#field_name: None));
                         }
                         for (variant, ty) in alternatives {
-                            let (_, parameter, convert) = stored_value(ty, &resources, &records)?;
+                            let (_, parameter, convert) =
+                                stored_value(ty, &resources, &records, target)?;
                             let setter = if sequence {
                                 ident(&format!("add{}{variant}", pascal(&member)))?
                             } else {
@@ -1159,7 +1461,9 @@ fn generate_parts(
                             } else {
                                 quote!(this.#field_name = Some(#union::#variant(#convert)))
                             };
+                            let export = exported(target, class, &setter);
                             methods.extend(quote! {
+                                #export
                                 pub extern "C" fn #setter(this: &mut #class, value: #parameter) {
                                     #store;
                                 }
@@ -1174,7 +1478,7 @@ fn generate_parts(
                         return Err(format!("unknown enum in {class}.{field_name}"));
                     }
                     let (stored, parameter, convert) =
-                        stored_value(&lowered_ty, &resources, &records)?;
+                        stored_value(&lowered_ty, &resources, &records, target)?;
                     match container {
                         "required" => {
                             stored_fields.extend(quote!(pub(crate) #field_name: #stored,));
@@ -1196,7 +1500,9 @@ fn generate_parts(
                             }
                             stored_fields.extend(quote!(pub(crate) #field_name: Option<#stored>,));
                             initial_values.push(quote!(#field_name: None));
+                            let export = exported(target, class, &field_name);
                             methods.extend(quote! {
+                                #export
                                 pub extern "C" fn #field_name(this: &mut #class, value: #parameter) {
                                     this.#field_name = Some(#convert);
                                 }
@@ -1225,10 +1531,14 @@ fn generate_parts(
                                         "generated method {class}.{add_null} is duplicated"
                                     ));
                                 }
+                                let export_add = exported(target, class, &add);
+                                let export_null = exported(target, class, &add_null);
                                 methods.extend(quote! {
+                                    #export_add
                                     pub extern "C" fn #add(this: &mut #class, value: #parameter) {
                                         this.#field_name.push(Some(#convert));
                                     }
+                                    #export_null
                                     pub extern "C" fn #add_null(this: &mut #class) {
                                         this.#field_name.push(None);
                                     }
@@ -1239,7 +1549,9 @@ fn generate_parts(
                                 });
                                 continue;
                             }
+                            let export = exported(target, class, &add);
                             methods.extend(quote! {
+                                #export
                                 pub extern "C" fn #add(this: &mut #class, value: #parameter) {
                                     this.#field_name.push(#convert);
                                 }
@@ -1249,7 +1561,10 @@ fn generate_parts(
                         _ => unreachable!(),
                     }
                 }
+                let constructor = ident("new")?;
+                let export = exported(target, class, &constructor);
                 methods.extend(quote! {
+                    #export
                     pub extern "C" fn new(#(#required_params),*) -> Box<#class> {
                         Box::new(#class { #(#required_values,)* #(#initial_values,)* })
                     }
@@ -1362,18 +1677,31 @@ fn generate_parts(
                                 if !resources.contains(&type_name(&target).unwrap_or_default()) {
                                     return Err("unknown returned resource".into());
                                 }
-                                (quote!(Box::new(#target { handle: value })), quote!(0))
-                            } else if let Some(target) = generic(ty, "Enum") {
-                                if !enums.contains(&type_name(&target).unwrap_or_default()) {
+                                (quote!(Box::new(#target::from_handle(value))), quote!(0))
+                            } else if let Some(enumeration) = generic(ty, "Enum") {
+                                if !enums.contains(&type_name(&enumeration).unwrap_or_default()) {
                                     return Err("unknown returned enum".into());
                                 }
-                                (
-                                    quote! { match #target::from_native(value) {
-                                        Some(value) => value.into(),
-                                        None => { caribou_abi::host::raise(caribou_abi::ErrorKind::Type, "native enum value is not declared"); #target::default().into() }
-                                    } },
-                                    quote!(#target::default().native()),
-                                )
+                                {
+                                    let raise = if target == RustTarget::Caribou {
+                                        quote!(caribou_abi::host::raise(
+                                            caribou_abi::ErrorKind::Type,
+                                            "native enum value is not declared"
+                                        ))
+                                    } else {
+                                        quote!(host::raise(
+                                            ErrorKind::Type,
+                                            "native enum value is not declared"
+                                        ))
+                                    };
+                                    (
+                                        quote! { match #enumeration::from_native(value) {
+                                            Some(value) => value.into(),
+                                            None => { #raise; #enumeration::default().into() }
+                                        } },
+                                        quote!(#enumeration::default().native()),
+                                    )
+                                }
                             } else if scalar(ty) {
                                 let fallback = match type_name(ty).as_deref() {
                                     Some("Text") => quote!(Text::NULL),
@@ -1418,11 +1746,19 @@ fn generate_parts(
                             backend::#native(#(#args),*)
                         }))
                     };
+                    let raise_call = if target == RustTarget::Caribou {
+                        quote!(caribou_abi::host::raise(
+                            caribou_abi::ErrorKind::Runtime,
+                            message
+                        ))
+                    } else {
+                        quote!(host::raise(ErrorKind::Runtime, message))
+                    };
                     let raise = quote! {
                         let message = error.downcast_ref::<String>().map(String::as_str)
                             .or_else(|| error.downcast_ref::<&str>().copied())
                             .unwrap_or("native backend panicked");
-                        caribou_abi::host::raise(caribou_abi::ErrorKind::Runtime, message);
+                        #raise_call;
                     };
                     let body = if return_type.is_empty() {
                         quote!(if let Err(error) = #call { #raise })
@@ -1442,12 +1778,36 @@ fn generate_parts(
                             #convert
                         }
                     };
+                    let export = exported(target, class, name);
                     methods.extend(quote! {
+                        #export
                         pub extern "C" fn #name(#(#params),*) #return_type { #body }
                     });
                     signatures.extend(quote!(fn #name(#(#types),*) #return_type;));
                 }
-                output.extend(quote!(#[derive(Default)] pub struct #class { pub(crate) handle: i32 } impl #class { #methods }));
+                let adapter_owned =
+                    target == RustTarget::Rayzor && adapter_resources.contains(&class.to_string());
+                let (declaration, constructor) = if adapter_owned {
+                    (quote!(), quote!())
+                } else {
+                    (
+                        quote! {
+                            #[derive(Default)]
+                            pub struct #class { pub(crate) handle: i32 }
+                        },
+                        quote! {
+                            #[allow(dead_code)]
+                            pub(crate) fn from_handle(handle: i32) -> Self { Self { handle } }
+                        },
+                    )
+                };
+                output.extend(quote! {
+                    #declaration
+                    impl #class {
+                        #constructor
+                        #methods
+                    }
+                });
                 exports.extend(quote!(class #class { #signatures }));
             }
             _ => unreachable!(),
@@ -1471,11 +1831,12 @@ fn generate_parts(
         idl_types,
         resources,
     };
-    Ok((
-        quote!(#output caribou_abi::plugin! { name: #namespace; #exports }).to_string(),
-        backend_fns,
-        plugin,
-    ))
+    let output = if target == RustTarget::Caribou {
+        quote!(#output caribou_abi::plugin! { name: #namespace; #exports })
+    } else {
+        output
+    };
+    Ok((output.to_string(), backend_fns, plugin))
 }
 
 /// A backend for a target that has only some of the backend's functions:
@@ -1488,7 +1849,13 @@ pub fn web_backend(
     webidl: &str,
     implemented: &str,
 ) -> Result<String, String> {
-    let (_, backend_fns, plugin) = generate_parts(namespace, declaration, webidl)?;
+    let (_, backend_fns, plugin) = generate_parts(
+        namespace,
+        declaration,
+        webidl,
+        RustTarget::Caribou,
+        &HashSet::new(),
+    )?;
     let file = syn::parse_file(implemented).map_err(error)?;
     let defined: HashSet<String> = file
         .items
@@ -1533,6 +1900,63 @@ pub fn web_backend(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rayzor_model_uses_adapter_carriers_and_exports_native_symbols() {
+        let api = r#"
+            enum Mode { Fast, Slow }
+            struct Options { label: Option<Text>, mode: Enum<Mode> }
+            trait Device {
+                #[native(device_open)] fn open(options: &Options) -> Box<Device>;
+                #[native(device_name)] fn name(this: &Device) -> Text;
+            }
+        "#;
+        let generated = generate_rayzor(api, "").unwrap();
+        assert!(!generated.contains("caribou_abi"));
+        assert!(!generated.contains("plugin !"));
+        assert!(generated.contains("Rooted < Text >"));
+        assert!(generated.contains("impl NativeEnum for Mode"));
+        assert!(generated.contains("export_name = \"xgpu_options_new\""));
+        assert!(generated.contains("export_name = \"xgpu_device_open\""));
+        assert!(generated.contains("host :: raise (ErrorKind :: Runtime"));
+        assert!(generated.contains("pub static XGPU_METHODS"));
+        assert!(generated.contains("\"rayzor::gpu::Device\""));
+        assert!(generated.contains("__xgpu_device_open as * const u8"));
+        assert!(generated.contains("fn __xgpu_options_new (a0 : i64)"));
+        assert!(generated.contains("transmute :: < i64 , Enum < Mode > >"));
+        assert!(generated.contains("param_types : [3u8 , 0u8"));
+    }
+
+    #[test]
+    fn the_complete_rayzor_model_and_registration_generate_together() {
+        let generated = generate_rayzor(&gpu_api(), WEBGPU_IDL).unwrap();
+        assert!(!generated.contains("caribou_abi"));
+        assert!(generated.contains("xgpu_gpu_device_create_buffer"));
+        assert!(generated.contains("\"rayzor::gpu::GpuDevice\""));
+        assert!(generated.contains("pub fn xgpu_runtime_symbols"));
+    }
+
+    #[test]
+    fn rayzor_can_supply_a_resource_wrapper_for_runtime_extensions() {
+        let generated = generate_rayzor_with_resources(
+            r#"
+                trait GpuBuffer {
+                    #[native(buffer_destroy)] fn destroy(this: &GpuBuffer);
+                }
+                trait GpuDevice {
+                    #[native(buffer_create)] fn buffer(this: &GpuDevice) -> Box<GpuBuffer>;
+                }
+            "#,
+            "",
+            &["GpuBuffer"],
+        )
+        .unwrap();
+        assert!(!generated.contains("pub struct GpuBuffer"));
+        assert!(generated.contains("impl GpuBuffer"));
+        assert!(generated.contains("GpuBuffer :: from_handle (value)"));
+        assert!(generated.contains("this . handle"));
+    }
+
     #[test]
     fn webidl_comments_and_spacing_do_not_change_enum_values() {
         let idl = tokens(
@@ -1576,7 +2000,7 @@ mod tests {
         assert!(generated.contains(
             "backend :: shader (this . handle , source , data , power . get () . native ())"
         ));
-        assert!(generated.contains("Box :: new (Shader { handle : value })"));
+        assert!(generated.contains("Box :: new (Shader :: from_handle (value))"));
         assert!(
             generated.contains(
                 "fn shader (& Device , Text , Buffer , Enum < Power >) -> Box < Shader >"
