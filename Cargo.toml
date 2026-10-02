@@ -7,9 +7,3 @@ version = "0.1.0"
 edition = "2024"
 repository = "https://github.com/rayzor-blade/xgpu"
 license = "MIT"
-
-# x-idl's library names, variant results, wire queue and HashLink Bytes
-# layout are not in a pinned revision yet; build against the sibling
-# checkout until they are.
-[patch."https://github.com/rayzor-blade/x-idl.git"]
-x_idl = { path = "../x-idl" }
