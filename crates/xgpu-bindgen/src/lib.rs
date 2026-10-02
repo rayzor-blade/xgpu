@@ -9,7 +9,7 @@
 
 use x_idl::haxe as x_idl_haxe;
 use x_idl::idl;
-pub use x_idl::wire;
+pub use x_idl::{wire, web_backend};
 pub mod haxe_js;
 
 
