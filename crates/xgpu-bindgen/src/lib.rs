@@ -9,7 +9,10 @@
 
 use x_idl::haxe as x_idl_haxe;
 use x_idl::idl;
+pub use x_idl::wire;
 pub mod haxe_js;
+
+
 
 /// The runtime-neutral API declaration consumed by every adapter generator.
 pub const GPU_API: &str = include_str!("../../../api/gpu.api.rs");
