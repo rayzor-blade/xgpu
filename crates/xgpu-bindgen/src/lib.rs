@@ -7,7 +7,10 @@
 //! does not infer native GPU semantics from WebIDL interfaces or generate a
 //! language-specific heap layout.
 
-pub use x_idl::{wire, haxe, web_backend, hashlink_web_backend, generate_rayzor_with_resources};
+pub use x_idl::{
+    Declaration, generate_rayzor_in, generate_rayzor_with_resources, hashlink_web_backend, haxe,
+    web_backend, wire,
+};
 pub mod haxe_js;
 
 
@@ -43,30 +46,15 @@ pub const HASHLINK_LIBRARY: x_idl::Library<'static> = x_idl::Library("xgpu");
 
 /// Generate xgpu's complete conventional Haxe surface for one runtime.
 pub fn _haxe(runtime: haxe::Runtime) -> Result<Vec<haxe::File>, String> {
-    static CALLS: AtomicUsize = AtomicUsize::new(0);
-    // A file of this call's own: x-idl reads declarations from a path, and
-    // builds generating at once must not share one.
-    let declaration = std::env::temp_dir().join(format!(
-        "gpu.api.{}.{}.rs",
-        std::process::id(),
-        CALLS.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::write(&declaration, gpu_api())
-        .map_err(|e| format!("failed to write gpu.api.rs: {e}"))?;
-    let files = match runtime {
-        haxe::Runtime::HashLink => {
-            HASHLINK_LIBRARY.haxe("gpu", Some(declaration.clone()), &browser_idl(), runtime)
-        }
-        haxe::Runtime::Rayzor => {
-            haxe::generate("rayzor.gpu", Some(declaration.clone()), &browser_idl(), runtime)
-        }
-    };
-    std::fs::remove_file(&declaration).ok();
-    files
+    match runtime {
+        haxe::Runtime::HashLink => HASHLINK_LIBRARY.haxe("gpu", gpu_api(), &browser_idl(), runtime),
+        haxe::Runtime::Rayzor => haxe::generate(RAYZOR_PACKAGE, gpu_api(), &browser_idl(), runtime),
+    }
 }
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+/// The Haxe package of Rayzor's externs, which also names the classes in
+/// the generated method table.
+pub const RAYZOR_PACKAGE: &str = "rayzor.gpu";
 
 fn pascal(name: &str) -> String {
     let mut result = String::new();
@@ -88,7 +76,7 @@ fn pascal(name: &str) -> String {
 /// the generated ABI uses typed native objects, enums, Text and Buffer.
 pub fn generate_caribou(
     namespace: &str,
-    declaration: Option<PathBuf>,
+    declaration: impl Into<Declaration>,
     webidl: &str,
 ) -> Result<String, String> {
     x_idl::generate_caribou(namespace, declaration, webidl)
@@ -97,21 +85,27 @@ pub fn generate_caribou(
 /// Emit the runtime-neutral model and exported C symbols used by Rayzor's
 /// native package. The adapter supplies Text, Buffer, roots, futures, errors,
 /// and the generic Enum carrier; xgpu supplies the object model and backend.
-pub fn generate_rayzor(declaration: Option<PathBuf>, webidl: &str) -> Result<String, String> {
-    x_idl::generate_rayzor_with_resources("gpu", declaration, webidl, &[])
+pub fn generate_rayzor(
+    declaration: impl Into<Declaration>,
+    webidl: &str,
+) -> Result<String, String> {
+    x_idl::generate_rayzor_in("gpu", RAYZOR_PACKAGE, declaration, webidl, &[])
 }
 
 /// Emit the runtime-neutral model and HashLink primitive resolvers used by
 /// hlwgpu. Resources cross as integer handles, records as GC-finalized native
 /// abstracts, and Promise results as Ash Future carriers.
-pub fn generate_hashlink(declaration: Option<PathBuf>, webidl: &str) -> Result<String, String> {
+pub fn generate_hashlink(
+    declaration: impl Into<Declaration>,
+    webidl: &str,
+) -> Result<String, String> {
     HASHLINK_LIBRARY.generate_hashlink("gpu", declaration, webidl)
 }
 
 /// Compatibility spelling for existing Caribou build scripts.
 pub fn generate(
     namespace: &str,
-    declaration: Option<PathBuf>,
+    declaration: impl Into<Declaration>,
     webidl: &str,
 ) -> Result<String, String> {
     generate_caribou(namespace, declaration, webidl)
@@ -122,6 +116,7 @@ mod tests {
     use std::env::temp_dir;
 
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn rayzor_model_uses_adapter_carriers_and_exports_native_symbols() {
@@ -146,7 +141,7 @@ mod tests {
         assert!(generated.contains("export_name = \"xidl_device_open\""));
         assert!(generated.contains("host :: raise (ErrorKind :: Runtime"));
         assert!(generated.contains("pub static XIDL_METHODS"));
-        assert!(generated.contains("\"gpu::Device\""));
+        assert!(generated.contains("\"rayzor::gpu::Device\""));
         assert!(generated.contains("__xidl_device_open as * const u8"));
         assert!(generated.contains("fn __xidl_options_new (a0 : i64)"));
         assert!(generated.contains("transmute :: < i64 , Enum < Mode > >"));
@@ -169,7 +164,7 @@ mod tests {
         let generated = generate_rayzor(Some(dec_dir), &browser_idl()).unwrap();
         assert!(!generated.contains("caribou_abi"));
         assert!(generated.contains("xidl_gpu_device_create_buffer"));
-        assert!(generated.contains("\"gpu::GpuDevice\""));
+        assert!(generated.contains("\"rayzor::gpu::GpuDevice\""));
         assert!(generated.contains("pub fn xidl_runtime_symbols"));
     }
 
