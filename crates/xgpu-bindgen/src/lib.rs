@@ -8,10 +8,8 @@
 //! language-specific heap layout.
 
 use x_idl::haxe as x_idl_haxe;
-use x_idl::idl;
-pub use x_idl::{wire, web_backend};
+pub use x_idl::{wire, web_backend, hashlink_web_backend};
 pub mod haxe_js;
-
 
 
 /// The runtime-neutral API declaration consumed by every adapter generator.
@@ -41,7 +39,7 @@ pub fn gpu_api() -> String {
 }
 
 /// Generate xgpu's complete conventional Haxe surface for one runtime.
-pub fn haxe(runtime: x_idl_haxe::Runtime) -> Result<Vec<x_idl_haxe::File>, String> {
+pub fn _haxe(runtime: x_idl_haxe::Runtime) -> Result<Vec<x_idl_haxe::File>, String> {
     let namespace = match runtime {
         x_idl_haxe::Runtime::HashLink => "gpu",
         x_idl_haxe::Runtime::Rayzor => "rayzor.gpu",
