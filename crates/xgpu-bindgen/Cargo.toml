@@ -13,4 +13,4 @@ proc-macro2 = "1"
 # The WebIDL parser the wire generator reads the whole IDL with.
 weedle2 = "5"
 wgpu-types = "30"
-x_idl ={git="https://github.com/rayzor-blade/x-idl.git", rev="8e8de890032ba058f9e7adbfe731bb7aa27a46fd"}
+x_idl ={git="https://github.com/rayzor-blade/x-idl.git", rev="bce92e00cd3b13b1b1ca0e94020b065a28d9e911"}
