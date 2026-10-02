@@ -21,9 +21,12 @@ use crate::handles::{Slab, kind_of};
 use crate::types::Kind;
 use crate::wire::{self, Handle, Mailbox};
 use crate::{
-    GpuBindGroupDescriptor, GpuBufferDescriptor, GpuComputePipelineDescriptor, GpuDeviceDescriptor,
-    GpuRenderPipelineDescriptor, GpuRequestAdapterOptions, GpuShaderModuleDescriptor,
-    GpuSurfaceConfiguration, GpuTextureDescriptor, GpuTextureViewDescriptor,
+    AttachmentView, GpuBindGroupDescriptor, GpuBufferDescriptor,
+    GpuComputePassDescriptor, GpuComputePipelineDescriptor, GpuDeviceDescriptor, GpuExtent3D,
+    GpuInstanceDescriptor, GpuRenderPassDescriptor, GpuRenderPipelineDescriptor,
+    GpuRequestAdapterOptions, GpuShaderModuleDescriptor, GpuSurfaceConfiguration,
+    GpuTexelCopyBufferInfo, GpuTexelCopyBufferLayout, GpuTexelCopyTextureInfo,
+    GpuTextureDescriptor, GpuTextureViewDescriptor,
 };
 
 /// `navigator.gpu`, as the agent keeps it.
@@ -91,6 +94,12 @@ struct Build {
     primitive: Option<wire::GPUPrimitiveState>,
 }
 
+/// What a popped error scope caught.
+struct ErrorEntry {
+    filter: i32,
+    message: String,
+}
+
 struct State {
     commands: wire::Encoder,
     /// Uploads the batch's commands read, until it is sent.
@@ -118,6 +127,26 @@ struct State {
     surfaces: Slab<Mutex<SurfaceEntry>>,
     capabilities: Slab<Capabilities>,
     builders: Slab<Mutex<Build>>,
+    samplers: Slab<()>,
+    pipeline_layouts: Slab<()>,
+    query_sets: Slab<()>,
+    bundle_encoders: Slab<()>,
+    bundles: Slab<()>,
+    errors: Slab<ErrorEntry>,
+    lost_infos: Slab<()>,
+    compilations: Slab<()>,
+    /// The error scopes the program has pushed, oldest first: each one's
+    /// device and filter. Each device also has its own scopes beneath these
+    /// (`CATCH_ALL`), which `device_take_error` reads.
+    scopes: Vec<(i32, i32)>,
+    /// What those catch-all scopes caught and no one has taken yet, with
+    /// each one's device.
+    uncaptured: Vec<(i32, String)>,
+    /// Each compilation info's messages, once read.
+    compiled: Vec<(i32, Vec<Message>)>,
+    /// Each shader's compiler messages, read once: a browser may leave a
+    /// second getCompilationInfo unanswered until the device has other work.
+    shader_infos: Vec<(i32, Vec<Message>)>,
     pending: Vec<Pending>,
 }
 
@@ -145,6 +174,18 @@ static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| {
         surfaces: Slab::new(Kind::Surface),
         capabilities: Slab::new(Kind::SurfaceCapabilities),
         builders: Slab::new(Kind::Builder),
+        samplers: Slab::new(Kind::Sampler),
+        pipeline_layouts: Slab::new(Kind::PipelineLayout),
+        query_sets: Slab::new(Kind::QuerySet),
+        bundle_encoders: Slab::new(Kind::BundleEncoder),
+        bundles: Slab::new(Kind::Bundle),
+        errors: Slab::new(Kind::Error),
+        lost_infos: Slab::new(Kind::LostInfo),
+        compilations: Slab::new(Kind::CompilationInfo),
+        scopes: Vec::new(),
+        uncaptured: Vec::new(),
+        compiled: Vec::new(),
+        shader_infos: Vec::new(),
         pending: Vec::new(),
     })
 });
@@ -191,6 +232,124 @@ impl State {
             self.next + 1
         };
         Handle(self.next)
+    }
+
+    /// A new handle of a kind the plugin keeps nothing for but the handle;
+    /// 0 for any other kind, or when the kind is full.
+    fn put(&mut self, kind: Kind) -> i32 {
+        match kind {
+            Kind::Shader => self.shaders.put(()),
+            Kind::Pipeline => self.pipelines.put(()),
+            Kind::Renderpipeline => self.render_pipelines.put(()),
+            Kind::BindGroupLayout => self.layouts.put(()),
+            Kind::Bindgroup => self.bind_groups.put(()),
+            Kind::Texture => self.textures.put(()),
+            Kind::View => self.views.put(()),
+            Kind::Sampler => self.samplers.put(()),
+            Kind::PipelineLayout => self.pipeline_layouts.put(()),
+            Kind::QuerySet => self.query_sets.put(()),
+            Kind::BundleEncoder => self.bundle_encoders.put(()),
+            Kind::Bundle => self.bundles.put(()),
+            Kind::LostInfo => self.lost_infos.put(()),
+            Kind::CompilationInfo => self.compilations.put(()),
+            _ => 0,
+        }
+    }
+
+    /// Whether `h` is a live handle of the kind it carries.
+    fn has(&self, h: i32) -> bool {
+        let k = kind_of(h);
+        let is = |kind: Kind| k == kind as i32;
+        if is(Kind::Instance) {
+            self.instances.get(h).is_some()
+        } else if is(Kind::Adapter) {
+            self.adapters.get(h).is_some()
+        } else if is(Kind::Device) {
+            self.devices.get(h).is_some()
+        } else if is(Kind::Queue) {
+            self.queues.get(h).is_some()
+        } else if is(Kind::Buffer) {
+            self.buffers.get(h).is_some()
+        } else if is(Kind::Shader) {
+            self.shaders.get(h).is_some()
+        } else if is(Kind::Pipeline) {
+            self.pipelines.get(h).is_some()
+        } else if is(Kind::Renderpipeline) {
+            self.render_pipelines.get(h).is_some()
+        } else if is(Kind::BindGroupLayout) {
+            self.layouts.get(h).is_some()
+        } else if is(Kind::Bindgroup) {
+            self.bind_groups.get(h).is_some()
+        } else if is(Kind::Encoder) {
+            self.encoders.get(h).is_some()
+        } else if is(Kind::Bindings) {
+            self.bindings.get(h).is_some()
+        } else if is(Kind::Texture) {
+            self.textures.get(h).is_some()
+        } else if is(Kind::View) {
+            self.views.get(h).is_some()
+        } else if is(Kind::Surface) {
+            self.surfaces.get(h).is_some()
+        } else if is(Kind::SurfaceCapabilities) {
+            self.capabilities.get(h).is_some()
+        } else if is(Kind::Builder) {
+            self.builders.get(h).is_some()
+        } else if is(Kind::Sampler) {
+            self.samplers.get(h).is_some()
+        } else if is(Kind::PipelineLayout) {
+            self.pipeline_layouts.get(h).is_some()
+        } else if is(Kind::QuerySet) {
+            self.query_sets.get(h).is_some()
+        } else if is(Kind::BundleEncoder) {
+            self.bundle_encoders.get(h).is_some()
+        } else if is(Kind::Bundle) {
+            self.bundles.get(h).is_some()
+        } else if is(Kind::Error) {
+            self.errors.get(h).is_some()
+        } else if is(Kind::LostInfo) {
+            self.lost_infos.get(h).is_some()
+        } else if is(Kind::CompilationInfo) {
+            self.compilations.get(h).is_some()
+        } else {
+            false
+        }
+    }
+
+    /// Drop the plugin's handle `h` from the table of the kind it carries.
+    fn remove(&mut self, h: i32) {
+        let k = kind_of(h);
+        let is = |kind: Kind| k == kind as i32;
+        if is(Kind::Shader) {
+            self.shaders.remove(h)
+        } else if is(Kind::Pipeline) {
+            self.pipelines.remove(h)
+        } else if is(Kind::Renderpipeline) {
+            self.render_pipelines.remove(h)
+        } else if is(Kind::BindGroupLayout) {
+            self.layouts.remove(h)
+        } else if is(Kind::Bindgroup) {
+            self.bind_groups.remove(h)
+        } else if is(Kind::Texture) {
+            self.textures.remove(h)
+        } else if is(Kind::View) {
+            self.views.remove(h)
+        } else if is(Kind::Sampler) {
+            self.samplers.remove(h)
+        } else if is(Kind::PipelineLayout) {
+            self.pipeline_layouts.remove(h)
+        } else if is(Kind::QuerySet) {
+            self.query_sets.remove(h)
+        } else if is(Kind::BundleEncoder) {
+            self.bundle_encoders.remove(h)
+        } else if is(Kind::Bundle) {
+            self.bundles.remove(h)
+        } else if is(Kind::Error) {
+            self.errors.remove(h)
+        } else if is(Kind::LostInfo) {
+            self.lost_infos.remove(h)
+        } else if is(Kind::CompilationInfo) {
+            self.compilations.remove(h)
+        }
     }
 }
 
@@ -239,6 +398,12 @@ impl Promise {
         promise
     }
 
+    /// What a resolved promise's reply carries.
+    fn value(&self) -> &[u8] {
+        let len = (self.reply.len as usize).min(self.message.len());
+        &self.message[..len]
+    }
+
     fn message(&self) -> String {
         match self.reply.state.load(SeqCst) {
             3 => "the GPU's error message is too long to carry".to_owned(),
@@ -260,6 +425,8 @@ enum Waiting {
     Adapter(Rooted<Future<crate::GpuAdapter>>, i32),
     Device(Rooted<Future<crate::GpuDevice>>, i32),
     Done(Rooted<Future<()>>),
+    /// Run on the program's thread with whether the promise resolved.
+    Then(Box<dyn FnOnce(bool, &Promise) + Send>),
 }
 
 /// Settle `waiting` from `promise` once the agent answers it.
@@ -295,7 +462,8 @@ fn settle() {
             }
             Waiting::Device(future, device) if resolved => {
                 // The queue came with the device; it is kept under a handle
-                // of its own before the program can ask for it.
+                // of its own before the program can ask for it. The
+                // catch-all scopes go in before any command can fail.
                 {
                     let mut s = state();
                     let queue = s.queues.put(());
@@ -304,6 +472,7 @@ fn settle() {
                     if let Some(entry) = s.devices.get(device) {
                         entry.store(queue, SeqCst);
                     }
+                    push_catch_all(&mut s, device);
                 }
                 if !future
                     .get()
@@ -315,6 +484,7 @@ fn settle() {
             Waiting::Done(future) if resolved => {
                 future.get().resolve(Value::null());
             }
+            Waiting::Then(then) => then(resolved, &p.promise),
             Waiting::Adapter(future, adapter) => {
                 state().adapters.remove(adapter);
                 future.get().reject(Text::new(&p.promise.message()).value());
@@ -460,6 +630,282 @@ fn shader_descriptor(
     })
 }
 
+// -- what generated natives call --------------------------------------------
+//
+// x-idl generates each native that is one WebIDL member as calls to these.
+// A class is the member's WebIDL interface, or its result's.
+
+/// How much a call answered at once may carry back.
+const ANSWER: usize = 1 << 16;
+
+/// The kind of handle the plugin keeps a WebIDL interface's objects under.
+fn kind(class: &str) -> Option<Kind> {
+    Some(match class {
+        "GPUAdapter" => Kind::Adapter,
+        "GPUDevice" => Kind::Device,
+        "GPUQueue" => Kind::Queue,
+        "GPUBuffer" => Kind::Buffer,
+        "GPUTexture" => Kind::Texture,
+        "GPUTextureView" => Kind::View,
+        "GPUSampler" => Kind::Sampler,
+        "GPUShaderModule" => Kind::Shader,
+        "GPUBindGroup" => Kind::Bindgroup,
+        "GPUBindGroupLayout" => Kind::BindGroupLayout,
+        "GPUPipelineLayout" => Kind::PipelineLayout,
+        "GPUComputePipeline" => Kind::Pipeline,
+        "GPURenderPipeline" => Kind::Renderpipeline,
+        "GPUCommandEncoder" => Kind::Encoder,
+        "GPUQuerySet" => Kind::QuerySet,
+        "GPURenderBundleEncoder" => Kind::BundleEncoder,
+        "GPURenderBundle" => Kind::Bundle,
+        "GPUError" => Kind::Error,
+        "GPUDeviceLostInfo" => Kind::LostInfo,
+        "GPUCompilationInfo" => Kind::CompilationInfo,
+        _ => return None,
+    })
+}
+
+/// Whether `h` is a live handle of `class`.
+pub(crate) fn live(class: &str, h: i32) -> bool {
+    kind(class).is_some_and(|k| kind_of(h) == k as i32) && state().has(h)
+}
+
+/// A new object of `class`, which `encode` makes under its handle; 0 when
+/// none can be made.
+pub(crate) fn make(class: &str, encode: impl FnOnce(&mut wire::Encoder, Handle)) -> i32 {
+    let Some(kind) = kind(class) else {
+        return 0;
+    };
+    let mut s = state();
+    let h = s.put(kind);
+    if h != 0 {
+        encode(&mut s.commands, handle(h));
+        s.flush_if_full();
+    }
+    h
+}
+
+/// A call with no result.
+pub(crate) fn command(encode: impl FnOnce(&mut wire::Encoder)) {
+    let mut s = state();
+    encode(&mut s.commands);
+    s.flush_if_full();
+}
+
+/// A call answered at once.
+pub(crate) fn ask<T: wire::Decode>(encode: impl FnOnce(&mut wire::Encoder, u32)) -> Option<T> {
+    answer(&mut state(), encode)
+}
+
+/// Send the batch with the call `encode` adds, and decode its reply.
+fn answer<T: wire::Decode>(
+    s: &mut State,
+    encode: impl FnOnce(&mut wire::Encoder, u32),
+) -> Option<T> {
+    let mut bytes = vec![0u8; ANSWER];
+    let reply = Reply::new(bytes.as_mut_ptr(), bytes.len());
+    encode(&mut s.commands, reply.at());
+    s.flush();
+    if reply.state.load(SeqCst) != 1 {
+        return None;
+    }
+    let len = (reply.len as usize).min(bytes.len());
+    T::decode(&mut wire::Decoder::new(&bytes[..len]))
+}
+
+/// A call answered by a promise. The future settles on the program's
+/// thread: `resolve` gives it the object of `class` the promise made, by
+/// its handle, or it resolves null when there is no class.
+pub(crate) fn promise<T: 'static>(
+    class: Option<&'static str>,
+    encode: impl FnOnce(&mut wire::Encoder, Option<Handle>, u32),
+    resolve: fn(Future<T>, i32) -> bool,
+) -> Future<T> {
+    let mut s = state();
+    let result = match class.map(kind) {
+        None => None,
+        Some(None) => return rejected("the web keeps no objects of this class"),
+        Some(Some(kind)) => match s.put(kind) {
+            0 => return rejected("no handle is free for the result"),
+            h => Some(h),
+        },
+    };
+    let promise = Promise::new();
+    encode(&mut s.commands, result.map(handle), promise.reply.at());
+    s.flush();
+    let future = Future::new();
+    let rooted = Rooted::new(future);
+    let then = move |resolved: bool, p: &Promise| match (resolved, result) {
+        (true, Some(h)) => {
+            if !resolve(rooted.get(), h) {
+                forget(|s| s.remove(h), h);
+            }
+        }
+        (true, None) => {
+            rooted.get().resolve(Value::null());
+        }
+        (false, h) => {
+            if let Some(h) = h {
+                forget(|s| s.remove(h), h);
+            }
+            rooted.get().reject(Text::new(&p.message()).value());
+        }
+    };
+    wait(&mut s, promise, Waiting::Then(Box::new(then)));
+    future
+}
+
+/// Drop `h`, a handle of `class`, and the agent's object under it.
+pub(crate) fn release(class: &str, h: i32) {
+    if live(class, h) {
+        forget(|s| s.remove(h), h);
+    }
+}
+
+/// Wait until the agent has answered each of `replies`.
+fn answered(replies: &[&Reply]) {
+    loop {
+        let seen = MAILBOX.settled.load(SeqCst);
+        if replies.iter().all(|r| r.state.load(SeqCst) != 0) {
+            return;
+        }
+        MAILBOX.wait_settled(seen);
+    }
+}
+
+// -- errors -----------------------------------------------------------------
+
+/// The scopes under everything the program pushes, pushed in this order:
+/// GPUErrorFilter's internal, out-of-memory, then validation on top.
+const CATCH_ALL: [i32; 3] = [2, 1, 0];
+
+fn push_catch_all(s: &mut State, device: i32) {
+    for filter in CATCH_ALL {
+        if let Some(filter) = wire::GPUErrorFilter::from_index(filter as u32) {
+            s.commands
+                .gpu_device_push_error_scope(handle(device), &filter);
+        }
+    }
+}
+
+/// Pop `device`'s innermost scope into `caught`, answered by the promise.
+fn pop_scope(s: &mut State, device: i32) -> (Handle, Box<Promise>) {
+    let caught = s.transient();
+    let promise = Promise::new();
+    s.commands
+        .gpu_device_pop_error_scope(handle(device), caught, promise.reply.at());
+    (caught, promise)
+}
+
+/// The message of the error a popped scope put under `caught`, which is
+/// released; none when the scope caught nothing.
+fn caught_message(s: &mut State, popped: &Promise, caught: Handle) -> Option<String> {
+    let message = (popped.value().first() == Some(&1)).then(|| {
+        answer::<String>(s, |c, at| c.gpu_error_get_message(caught, at)).unwrap_or_default()
+    });
+    s.commands.release(caught);
+    message
+}
+
+pub unsafe fn error_scope_push(device: i32, filter: i32) {
+    let Some(wired) = wire::GPUErrorFilter::from_index(filter as u32) else {
+        host::raise(ErrorKind::Type, "an unknown error filter");
+        return;
+    };
+    let mut s = state();
+    if s.devices.get(device).is_none() {
+        return;
+    }
+    s.scopes.push((device, filter));
+    s.commands
+        .gpu_device_push_error_scope(handle(device), &wired);
+}
+
+/// The scope's filter is the error's: WebGPU tells them apart by class.
+pub unsafe fn error_scope_pop(device: i32) -> Future<crate::GpuError> {
+    let mut s = state();
+    if s.devices.get(device).is_none() {
+        return rejected("device was destroyed");
+    }
+    let Some(at) = s.scopes.iter().rposition(|(owner, _)| *owner == device) else {
+        return rejected("no error scope was pushed for this device");
+    };
+    let (_, filter) = s.scopes.remove(at);
+    let (caught, promise) = pop_scope(&mut s, device);
+    s.flush();
+    let future = Future::new();
+    let rooted = Rooted::new(future);
+    let then = move |resolved: bool, p: &Promise| {
+        if !resolved {
+            state().commands.release(caught);
+            rooted.get().reject(Text::new(&p.message()).value());
+            return;
+        }
+        let message = caught_message(&mut state(), p, caught);
+        let Some(message) = message else {
+            rooted.get().resolve(Value::null());
+            return;
+        };
+        let error = state().errors.put(ErrorEntry { filter, message });
+        if !rooted
+            .get()
+            .resolve_boxed(Box::new(crate::GpuError { handle: error }))
+        {
+            state().errors.remove(error);
+        }
+    };
+    wait(&mut s, promise, Waiting::Then(Box::new(then)));
+    future
+}
+
+pub unsafe fn error_destroy(error: i32) {
+    state().errors.remove(error);
+}
+
+pub unsafe fn error_filter(error: i32) -> i32 {
+    state().errors.get(error).map_or(0, |e| e.filter)
+}
+
+pub unsafe fn error_message(error: i32) -> Text {
+    match state().errors.get(error) {
+        Some(e) => Text::new(&e.message),
+        None => Text::NULL,
+    }
+}
+
+/// The oldest error no scope of the program's caught, or null. The
+/// device's catch-all scopes are popped, read and pushed again, which waits
+/// for the GPU to have checked what was sent; they cannot be reached while
+/// a scope of the program's is open on the device.
+pub unsafe fn device_take_error(device: i32) -> Text {
+    let mut s = state();
+    if s.devices.get(device).is_none() {
+        return Text::NULL;
+    }
+    if !s.scopes.iter().any(|(owner, _)| *owner == device) {
+        let mut pops = Vec::new();
+        for _ in CATCH_ALL {
+            pops.push(pop_scope(&mut s, device));
+        }
+        push_catch_all(&mut s, device);
+        s.flush();
+        drop(s);
+        answered(&pops.iter().map(|(_, p)| &p.reply).collect::<Vec<_>>());
+        s = state();
+        for (caught, p) in pops {
+            if p.reply.state.load(SeqCst) != 1 {
+                s.commands.release(caught);
+            } else if let Some(message) = caught_message(&mut s, &p, caught) {
+                s.uncaptured.push((device, message));
+            }
+        }
+    }
+    match s.uncaptured.iter().position(|(owner, _)| *owner == device) {
+        Some(at) => Text::new(&s.uncaptured.remove(at).1),
+        None => Text::NULL,
+    }
+}
+
 // -- instance and adapter ---------------------------------------------------
 
 pub unsafe fn instance_create() -> i32 {
@@ -492,6 +938,12 @@ pub unsafe fn instance_create() -> i32 {
         }
     }
     s.instances.put(())
+}
+
+/// A browser has one WebGPU: there are no backends to choose between, and
+/// wgpu's instance flags have nothing to act on.
+pub unsafe fn instance_create_with(_descriptor: &GpuInstanceDescriptor) -> i32 {
+    unsafe { instance_create() }
 }
 
 pub unsafe fn instance_destroy(instance: i32) {
@@ -659,9 +1111,14 @@ pub unsafe fn device_destroy(device: i32) {
     let queue = entry.load(SeqCst);
     s.devices.remove(device);
     s.queues.remove(queue);
+    s.scopes.retain(|(owner, _)| *owner != device);
+    s.uncaptured.retain(|(owner, _)| *owner != device);
     s.commands.gpu_device_destroy(handle(device));
     s.commands.release(handle(queue));
     s.commands.release(handle(device));
+    // Sent now: what the destroy settles, the device's lost future, may be
+    // awaited next, and an await sends nothing.
+    s.flush();
 }
 
 pub unsafe fn queue_work_done(device: i32, queue: i32) -> Future<()> {
@@ -787,6 +1244,29 @@ pub unsafe fn buffer_copy_out(buffer: i32, offset: i64, out: BufferMut, len: i32
     reply.state.load(SeqCst) == 1 && reply.len == len as u32
 }
 
+/// The first `len` bytes of `data` into the mapped range at `offset`. False
+/// when that range is not mapped for writing.
+pub unsafe fn buffer_copy_in(buffer: i32, offset: i64, data: Buffer, len: i32) -> bool {
+    let Some(data) = bytes(&data, len) else {
+        return false;
+    };
+    let mut s = state();
+    if s.buffers.get(buffer).is_none() {
+        return false;
+    }
+    let staged = s.stage(data);
+    let reply = Reply::new(std::ptr::null_mut(), 0);
+    s.commands.gpu_buffer_get_mapped_range_write(
+        handle(buffer),
+        reply.at(),
+        &Some(offset.max(0) as u64),
+        &Some(data.len() as u64),
+        &staged,
+    );
+    s.flush();
+    reply.state.load(SeqCst) == 1
+}
+
 pub unsafe fn buffer_unmap(buffer: i32) {
     let mut s = state();
     if s.buffers.get(buffer).is_some() {
@@ -833,7 +1313,13 @@ pub unsafe fn shader_create_with(device: i32, descriptor: &GpuShaderModuleDescri
 }
 
 pub unsafe fn shader_destroy(shader: i32) {
-    forget(|s| s.shaders.remove(shader), shader);
+    forget(
+        |s| {
+            s.shaders.remove(shader);
+            s.shader_infos.retain(|(owner, _)| *owner != shader);
+        },
+        shader,
+    );
 }
 
 /// A compute pipeline descriptor's layout: unset is "auto", as the plugin
@@ -933,13 +1419,26 @@ pub unsafe fn bindings_create() -> i32 {
     state().bindings.put(Mutex::new(Vec::new()))
 }
 
-pub unsafe fn bindings_buffer(bindings: i32, buffer: i32) {
+/// Add `resource`, a buffer, view or sampler, as the next binding.
+fn bind(bindings: i32, resource: i32) {
     let s = state();
     if let Some(list) = s.bindings.get(bindings)
-        && s.buffers.get(buffer).is_some()
+        && s.has(resource)
     {
-        list.lock().unwrap().push(buffer);
+        list.lock().unwrap().push(resource);
     }
+}
+
+pub unsafe fn bindings_buffer(bindings: i32, buffer: i32) {
+    bind(bindings, buffer);
+}
+
+pub unsafe fn bindings_view(bindings: i32, view: i32) {
+    bind(bindings, view);
+}
+
+pub unsafe fn bindings_sampler(bindings: i32, sampler: i32) {
+    bind(bindings, sampler);
 }
 
 pub unsafe fn bindings_destroy(bindings: i32) {
@@ -960,9 +1459,15 @@ pub unsafe fn bind_group_create(device: i32, pipeline: i32, group: i32, bindings
         .unwrap()
         .iter()
         .enumerate()
-        .map(|(binding, &buffer)| wire::GPUBindGroupEntry {
+        .map(|(binding, &resource)| wire::GPUBindGroupEntry {
             binding: binding as u32,
-            resource: wire::GPUBindingResource::GPUBuffer(handle(buffer)),
+            resource: if kind_of(resource) == Kind::View as i32 {
+                wire::GPUBindingResource::GPUTextureView(handle(resource))
+            } else if kind_of(resource) == Kind::Sampler as i32 {
+                wire::GPUBindingResource::GPUSampler(handle(resource))
+            } else {
+                wire::GPUBindingResource::GPUBuffer(handle(resource))
+            },
         })
         .collect();
     let layout = s.transient();
@@ -1018,66 +1523,167 @@ pub unsafe fn encoder_destroy(encoder: i32) {
     forget(|s| s.encoders.remove(encoder), encoder);
 }
 
-/// Run `body` on `encoder`'s entry and the batch, or do nothing.
-fn encoding(encoder: i32, body: impl FnOnce(&mut EncoderEntry, &mut State)) {
-    let mut s = state();
-    let Some(entry) = s.encoders.get(encoder) else {
-        return;
+/// Run `body` on `encoder`'s entry and the batch, or do nothing. What it
+/// refuses is raised once both are unlocked: a raise does not return.
+fn encoding(
+    encoder: i32,
+    body: impl FnOnce(&mut EncoderEntry, &mut State) -> Result<(), String>,
+) {
+    let refused = {
+        let mut s = state();
+        let Some(entry) = s.encoders.get(encoder) else {
+            return;
+        };
+        let mut entry = entry.lock().unwrap();
+        body(&mut entry, &mut s)
     };
-    let mut entry = entry.lock().unwrap();
-    body(&mut entry, &mut s);
+    if let Err(message) = refused {
+        host::raise(ErrorKind::Runtime, &message);
+    }
 }
 
 /// The open compute pass's commands, when one is open.
-fn in_compute(encoder: i32, body: impl FnOnce(Handle, &mut wire::Encoder)) {
+fn in_compute(encoder: i32, body: impl FnOnce(Handle, &mut State)) {
     encoding(encoder, |entry, s| {
         if entry.compute != 0 {
-            body(Handle(entry.compute), &mut s.commands);
+            body(Handle(entry.compute), s);
         }
+        Ok(())
     });
 }
 
 /// The open render pass's commands, when one is open.
-fn in_render(encoder: i32, body: impl FnOnce(Handle, &mut wire::Encoder)) {
+fn in_render(encoder: i32, body: impl FnOnce(Handle, &mut State)) {
     encoding(encoder, |entry, s| {
         if entry.render != 0 {
-            body(Handle(entry.render), &mut s.commands);
+            body(Handle(entry.render), s);
+        }
+        Ok(())
+    });
+}
+
+/// The open compute pass's commands; raised when none is open.
+fn computing(encoder: i32, body: impl FnOnce(Handle, &mut State)) {
+    encoding(encoder, |entry, s| match entry.compute {
+        0 => Err("gpu: no compute pass is open on this encoder".to_owned()),
+        pass => {
+            body(Handle(pass), s);
+            Ok(())
         }
     });
 }
 
-fn pass_open(entry: &EncoderEntry) -> bool {
+/// The open render pass's commands; raised when none is open.
+fn rendering(encoder: i32, body: impl FnOnce(Handle, &mut State)) {
+    encoding(encoder, |entry, s| match entry.render {
+        0 => Err("gpu: no render pass is open on this encoder".to_owned()),
+        pass => {
+            body(Handle(pass), s);
+            Ok(())
+        }
+    });
+}
+
+/// The encoder's own commands; raised while a pass is open.
+fn copying(encoder: i32, body: impl FnOnce(Handle, &mut State)) {
+    encoding(encoder, |entry, s| {
+        if entry.compute != 0 || entry.render != 0 {
+            return Err("gpu: a pass is open on this encoder".to_owned());
+        }
+        body(handle(encoder), s);
+        Ok(())
+    });
+}
+
+fn pass_open(entry: &EncoderEntry) -> Result<(), String> {
     if entry.compute != 0 || entry.render != 0 {
-        host::raise(
-            ErrorKind::Runtime,
-            "gpu: a pass is already open on this encoder",
-        );
-        return true;
+        return Err("gpu: a pass is already open on this encoder".to_owned());
     }
-    false
+    Ok(())
+}
+
+/// `value` as a count or index; raised when negative.
+fn unsigned(value: i32, what: &str) -> Option<u32> {
+    match u32::try_from(value) {
+        Ok(value) => Some(value),
+        Err(_) => {
+            host::raise(ErrorKind::Type, &format!("gpu: a negative {what}"));
+            None
+        }
+    }
+}
+
+/// `offset` and a size that is the rest of the buffer when negative.
+fn range(offset: i64, size: i64) -> Option<(u64, Option<u64>)> {
+    let Ok(offset) = u64::try_from(offset) else {
+        host::raise(ErrorKind::Type, "gpu: a negative buffer offset");
+        return None;
+    };
+    Some((offset, u64::try_from(size).ok()))
+}
+
+/// `count` dynamic offsets from element `start` of a shared buffer of
+/// 32-bit values, as WebGPU's Uint32Array overload of setBindGroup reads
+/// them.
+fn dynamic_offsets(data: &Buffer, start: i64, count: i32) -> Option<Vec<u32>> {
+    let (Ok(start), Ok(count)) = (usize::try_from(start), usize::try_from(count)) else {
+        host::raise(ErrorKind::Type, "negative dynamic offset range");
+        return None;
+    };
+    let end = start.checked_add(count).and_then(|end| end.checked_mul(4));
+    if end.is_none_or(|end| end > data.len()) {
+        host::raise(ErrorKind::Type, "dynamic offsets exceed the shared buffer");
+        return None;
+    }
+    let bytes = unsafe { &data.as_slice()[start * 4..(start + count) * 4] };
+    Some(
+        bytes
+            .chunks_exact(4)
+            .map(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
+            .collect(),
+    )
+}
+
+/// The plugin's IndexFormat, GPUIndexFormat's index.
+fn index_format(format: i32) -> wire::GPUIndexFormat {
+    wire::GPUIndexFormat::from_index(format as u32).unwrap_or(wire::GPUIndexFormat::Uint16)
 }
 
 pub unsafe fn compute_begin(encoder: i32) {
     encoding(encoder, |entry, s| {
-        if pass_open(entry) {
-            return;
-        }
+        pass_open(entry)?;
         let pass = s.transient();
         s.commands
             .gpu_command_encoder_begin_compute_pass(handle(encoder), pass, &None);
         entry.compute = pass.0;
+        Ok(())
+    });
+}
+
+pub unsafe fn compute_pass_begin_with(encoder: i32, descriptor: &GpuComputePassDescriptor) {
+    let Some(wired) = converted(descriptor.wire()) else {
+        return;
+    };
+    encoding(encoder, |entry, s| {
+        pass_open(entry)?;
+        let pass = s.transient();
+        s.commands
+            .gpu_command_encoder_begin_compute_pass(handle(encoder), pass, &Some(wired));
+        entry.compute = pass.0;
+        Ok(())
     });
 }
 
 pub unsafe fn compute_set_pipeline(encoder: i32, pipeline: i32) {
-    in_compute(encoder, |pass, c| {
-        c.gpu_compute_pass_encoder_set_pipeline(pass, &handle(pipeline))
+    in_compute(encoder, |pass, s| {
+        s.commands
+            .gpu_compute_pass_encoder_set_pipeline(pass, &handle(pipeline))
     });
 }
 
 pub unsafe fn compute_set_bind_group(encoder: i32, group: i32, bind_group: i32) {
-    in_compute(encoder, |pass, c| {
-        c.gpu_compute_pass_encoder_set_bind_group(
+    in_compute(encoder, |pass, s| {
+        s.commands.gpu_compute_pass_encoder_set_bind_group(
             pass,
             &(group.max(0) as u32),
             &Some(handle(bind_group)),
@@ -1086,9 +1692,30 @@ pub unsafe fn compute_set_bind_group(encoder: i32, group: i32, bind_group: i32) 
     });
 }
 
+pub unsafe fn compute_set_bind_group_offsets(
+    encoder: i32,
+    group: i32,
+    bind_group: i32,
+    offsets: Buffer,
+    start: i64,
+    count: i32,
+) {
+    let Some(offsets) = dynamic_offsets(&offsets, start, count) else {
+        return;
+    };
+    in_compute(encoder, |pass, s| {
+        s.commands.gpu_compute_pass_encoder_set_bind_group(
+            pass,
+            &(group.max(0) as u32),
+            &Some(handle(bind_group)),
+            &Some(offsets),
+        )
+    });
+}
+
 pub unsafe fn compute_dispatch(encoder: i32, x: i32, y: i32, z: i32) {
-    in_compute(encoder, |pass, c| {
-        c.gpu_compute_pass_encoder_dispatch_workgroups(
+    in_compute(encoder, |pass, s| {
+        s.commands.gpu_compute_pass_encoder_dispatch_workgroups(
             pass,
             &(x.max(0) as u32),
             &Some(y.max(0) as u32),
@@ -1097,8 +1724,20 @@ pub unsafe fn compute_dispatch(encoder: i32, x: i32, y: i32, z: i32) {
     });
 }
 
+pub unsafe fn compute_dispatch_indirect(encoder: i32, buffer: i32, offset: i64) {
+    computing(encoder, |pass, s| {
+        if s.has(buffer) {
+            s.commands.gpu_compute_pass_encoder_dispatch_workgroups_indirect(
+                pass,
+                &handle(buffer),
+                &(offset.max(0) as u64),
+            );
+        }
+    });
+}
+
 /// End whichever pass is open on the encoder.
-fn end_pass(entry: &mut EncoderEntry, s: &mut State) {
+fn end_pass(entry: &mut EncoderEntry, s: &mut State) -> Result<(), String> {
     if entry.compute != 0 {
         s.commands
             .gpu_compute_pass_encoder_end(Handle(entry.compute));
@@ -1110,6 +1749,7 @@ fn end_pass(entry: &mut EncoderEntry, s: &mut State) {
         s.commands.release(Handle(entry.render));
         entry.render = 0;
     }
+    Ok(())
 }
 
 pub unsafe fn compute_end(encoder: i32) {
@@ -1133,6 +1773,22 @@ pub unsafe fn encoder_compute(
     }
 }
 
+pub unsafe fn encoder_compute_indirect(
+    encoder: i32,
+    pipeline: i32,
+    bind_group: i32,
+    buffer: i32,
+    offset: i64,
+) {
+    unsafe {
+        compute_begin(encoder);
+        compute_set_pipeline(encoder, pipeline);
+        compute_set_bind_group(encoder, 0, bind_group);
+        compute_dispatch_indirect(encoder, buffer, offset);
+        compute_end(encoder);
+    }
+}
+
 pub unsafe fn encoder_copy_buffer(
     encoder: i32,
     src: i32,
@@ -1143,7 +1799,7 @@ pub unsafe fn encoder_copy_buffer(
 ) {
     encoding(encoder, |_, s| {
         if s.buffers.get(src).is_none() || s.buffers.get(dst).is_none() {
-            return;
+            return Ok(());
         }
         s.commands.gpu_command_encoder_copy_buffer_to_buffer_2(
             handle(encoder),
@@ -1153,6 +1809,7 @@ pub unsafe fn encoder_copy_buffer(
             &(dst_offset.max(0) as u64),
             &Some(size.max(0) as u64),
         );
+        Ok(())
     });
 }
 
@@ -1163,7 +1820,7 @@ pub unsafe fn encoder_submit(encoder: i32, queue: i32) {
     let Some(entry) = s.encoders.get(encoder) else {
         return;
     };
-    end_pass(&mut entry.lock().unwrap(), &mut s);
+    let _ = end_pass(&mut entry.lock().unwrap(), &mut s);
     s.encoders.remove(encoder);
     if s.queues.get(queue).is_some() {
         let commands = s.transient();
@@ -1176,15 +1833,281 @@ pub unsafe fn encoder_submit(encoder: i32, queue: i32) {
     s.flush_if_full();
 }
 
+// -- copies -----------------------------------------------------------------
+
+/// All of mip level zero of `texture`, as a copy's side.
+fn whole(texture: i32) -> wire::GPUTexelCopyTextureInfo {
+    wire::GPUTexelCopyTextureInfo {
+        texture: handle(texture),
+        mip_level: None,
+        origin: None,
+        aspect: None,
+    }
+}
+
+/// A two-dimensional copy's extent, at least one texel each way.
+fn extent(width: i32, height: i32) -> wire::GPUExtent3D {
+    wire::GPUExtent3D::GPUExtent3DDict(wire::GPUExtent3DDict {
+        width: width.max(1) as u32,
+        height: Some(height.max(1) as u32),
+        depth_or_array_layers: Some(1),
+    })
+}
+
+/// Rows of `bytes_per_row` bytes, `height` of them to an image.
+fn rows(bytes_per_row: i32, height: i32) -> wire::GPUTexelCopyBufferLayout {
+    wire::GPUTexelCopyBufferLayout {
+        offset: None,
+        bytes_per_row: Some(bytes_per_row.max(0) as u32),
+        rows_per_image: Some(height.max(1) as u32),
+    }
+}
+
+fn buffer_side(buffer: i32, layout: wire::GPUTexelCopyBufferLayout) -> wire::GPUTexelCopyBufferInfo {
+    wire::GPUTexelCopyBufferInfo {
+        offset: layout.offset,
+        bytes_per_row: layout.bytes_per_row,
+        rows_per_image: layout.rows_per_image,
+        buffer: handle(buffer),
+    }
+}
+
+/// A copy's extent as the wire's.
+fn extent_of(size: &GpuExtent3D) -> Option<wire::GPUExtent3D> {
+    converted(size.wire()).map(wire::GPUExtent3D::GPUExtent3DDict)
+}
+
+pub unsafe fn encoder_copy_buffer_to_texture(
+    encoder: i32,
+    buffer: i32,
+    bytes_per_row: i32,
+    texture: i32,
+    width: i32,
+    height: i32,
+) {
+    copying(encoder, |this, s| {
+        if s.buffers.get(buffer).is_some() && s.textures.get(texture).is_some() {
+            s.commands.gpu_command_encoder_copy_buffer_to_texture(
+                this,
+                &buffer_side(buffer, rows(bytes_per_row, height)),
+                &whole(texture),
+                &extent(width, height),
+            );
+        }
+    });
+}
+
+pub unsafe fn encoder_copy_texture_to_buffer(
+    encoder: i32,
+    texture: i32,
+    buffer: i32,
+    width: i32,
+    height: i32,
+    bytes_per_row: i32,
+) {
+    copying(encoder, |this, s| {
+        if s.buffers.get(buffer).is_some() && s.textures.get(texture).is_some() {
+            s.commands.gpu_command_encoder_copy_texture_to_buffer(
+                this,
+                &whole(texture),
+                &buffer_side(buffer, rows(bytes_per_row, height)),
+                &extent(width, height),
+            );
+        }
+    });
+}
+
+pub unsafe fn encoder_copy_texture_to_texture(
+    encoder: i32,
+    src: i32,
+    dst: i32,
+    width: i32,
+    height: i32,
+) {
+    copying(encoder, |this, s| {
+        if s.textures.get(src).is_some() && s.textures.get(dst).is_some() {
+            s.commands.gpu_command_encoder_copy_texture_to_texture(
+                this,
+                &whole(src),
+                &whole(dst),
+                &extent(width, height),
+            );
+        }
+    });
+}
+
+pub unsafe fn encoder_copy_buffer_to_texture_with(
+    encoder: i32,
+    source: &GpuTexelCopyBufferInfo,
+    destination: &GpuTexelCopyTextureInfo,
+    size: &GpuExtent3D,
+) {
+    let (Some(source), Some(destination), Some(size)) = (
+        converted(source.wire()),
+        converted(destination.wire()),
+        extent_of(size),
+    ) else {
+        return;
+    };
+    copying(encoder, |this, s| {
+        s.commands
+            .gpu_command_encoder_copy_buffer_to_texture(this, &source, &destination, &size)
+    });
+}
+
+pub unsafe fn encoder_copy_texture_to_buffer_with(
+    encoder: i32,
+    source: &GpuTexelCopyTextureInfo,
+    destination: &GpuTexelCopyBufferInfo,
+    size: &GpuExtent3D,
+) {
+    let (Some(source), Some(destination), Some(size)) = (
+        converted(source.wire()),
+        converted(destination.wire()),
+        extent_of(size),
+    ) else {
+        return;
+    };
+    copying(encoder, |this, s| {
+        s.commands
+            .gpu_command_encoder_copy_texture_to_buffer(this, &source, &destination, &size)
+    });
+}
+
+pub unsafe fn encoder_copy_texture_to_texture_with(
+    encoder: i32,
+    source: &GpuTexelCopyTextureInfo,
+    destination: &GpuTexelCopyTextureInfo,
+    size: &GpuExtent3D,
+) {
+    let (Some(source), Some(destination), Some(size)) = (
+        converted(source.wire()),
+        converted(destination.wire()),
+        extent_of(size),
+    ) else {
+        return;
+    };
+    copying(encoder, |this, s| {
+        s.commands
+            .gpu_command_encoder_copy_texture_to_texture(this, &source, &destination, &size)
+    });
+}
+
+pub unsafe fn encoder_clear_buffer(encoder: i32, buffer: i32, offset: i64, size: i64) {
+    copying(encoder, |this, s| {
+        if s.buffers.get(buffer).is_some() {
+            s.commands.gpu_command_encoder_clear_buffer(
+                this,
+                &handle(buffer),
+                &Some(offset.max(0) as u64),
+                &Some(size.max(0) as u64),
+            );
+        }
+    });
+}
+
+pub unsafe fn encoder_resolve_query_set(
+    encoder: i32,
+    query_set: i32,
+    first: i32,
+    count: i32,
+    destination: i32,
+    offset: i64,
+) {
+    let (Some(first), Some(count)) = (unsigned(first, "first query"), unsigned(count, "query count"))
+    else {
+        return;
+    };
+    let Some((offset, _)) = range(offset, 0) else {
+        return;
+    };
+    copying(encoder, |this, s| {
+        if s.query_sets.get(query_set).is_some() && s.buffers.get(destination).is_some() {
+            s.commands.gpu_command_encoder_resolve_query_set(
+                this,
+                &handle(query_set),
+                &first,
+                &count,
+                &handle(destination),
+                &offset,
+            );
+        }
+    });
+}
+
+// -- debug labels -----------------------------------------------------------
+
+/// A label belongs to whatever is recording: the open pass, or the encoder
+/// when none is.
+fn labelling(
+    encoder: i32,
+    render: impl FnOnce(&mut wire::Encoder, Handle),
+    compute: impl FnOnce(&mut wire::Encoder, Handle),
+    own: impl FnOnce(&mut wire::Encoder, Handle),
+) {
+    encoding(encoder, |entry, s| {
+        if entry.render != 0 {
+            render(&mut s.commands, Handle(entry.render));
+        } else if entry.compute != 0 {
+            compute(&mut s.commands, Handle(entry.compute));
+        } else {
+            own(&mut s.commands, handle(encoder));
+        }
+        Ok(())
+    });
+}
+
+pub unsafe fn encoder_push_debug_group(encoder: i32, label: Text) {
+    let label = label.as_str().to_owned();
+    labelling(
+        encoder,
+        |c, h| c.gpu_render_pass_encoder_push_debug_group(h, &label),
+        |c, h| c.gpu_compute_pass_encoder_push_debug_group(h, &label),
+        |c, h| c.gpu_command_encoder_push_debug_group(h, &label),
+    );
+}
+
+pub unsafe fn encoder_pop_debug_group(encoder: i32) {
+    labelling(
+        encoder,
+        |c, h| c.gpu_render_pass_encoder_pop_debug_group(h),
+        |c, h| c.gpu_compute_pass_encoder_pop_debug_group(h),
+        |c, h| c.gpu_command_encoder_pop_debug_group(h),
+    );
+}
+
+pub unsafe fn encoder_insert_debug_marker(encoder: i32, label: Text) {
+    let label = label.as_str().to_owned();
+    labelling(
+        encoder,
+        |c, h| c.gpu_render_pass_encoder_insert_debug_marker(h, &label),
+        |c, h| c.gpu_compute_pass_encoder_insert_debug_marker(h, &label),
+        |c, h| c.gpu_command_encoder_insert_debug_marker(h, &label),
+    );
+}
+
 // -- render passes ----------------------------------------------------------
 
 pub unsafe fn pass_colour(encoder: i32, view: i32, r: f64, g: f64, b: f64, a: f64) {
-    encoding(encoder, |entry, _| entry.colour.push((view, [r, g, b, a])));
+    encoding(encoder, |entry, _| {
+        entry.colour.push((view, [r, g, b, a]));
+        Ok(())
+    });
 }
 
 pub unsafe fn pass_depth(encoder: i32, view: i32, clear: f64, stencil_clear: i32) {
     encoding(encoder, |entry, _| {
-        entry.depth = Some((view, clear, stencil_clear))
+        entry.depth = Some((view, clear, stencil_clear));
+        Ok(())
+    });
+}
+
+/// Forget the attachments described for the next pass.
+pub unsafe fn pass_reset(encoder: i32) {
+    encoding(encoder, |entry, _| {
+        entry.colour.clear();
+        entry.depth = None;
+        Ok(())
     });
 }
 
@@ -1192,9 +2115,7 @@ pub unsafe fn pass_depth(encoder: i32, view: i32, clear: f64, stencil_clear: i32
 /// and the depth attachment, with its stencil when it was given a clear.
 pub unsafe fn pass_begin(encoder: i32) {
     encoding(encoder, |entry, s| {
-        if pass_open(entry) {
-            return;
-        }
+        pass_open(entry)?;
         let color_attachments = entry
             .colour
             .drain(..)
@@ -1242,18 +2163,34 @@ pub unsafe fn pass_begin(encoder: i32) {
             },
         );
         entry.render = pass.0;
+        Ok(())
+    });
+}
+
+pub unsafe fn render_pass_begin_with(encoder: i32, descriptor: &GpuRenderPassDescriptor) {
+    let Some(wired) = converted(descriptor.wire()) else {
+        return;
+    };
+    encoding(encoder, |entry, s| {
+        pass_open(entry)?;
+        let pass = s.transient();
+        s.commands
+            .gpu_command_encoder_begin_render_pass(handle(encoder), pass, &wired);
+        entry.render = pass.0;
+        Ok(())
     });
 }
 
 pub unsafe fn render_set_pipeline(encoder: i32, pipeline: i32) {
-    in_render(encoder, |pass, c| {
-        c.gpu_render_pass_encoder_set_pipeline(pass, &handle(pipeline))
+    in_render(encoder, |pass, s| {
+        s.commands
+            .gpu_render_pass_encoder_set_pipeline(pass, &handle(pipeline))
     });
 }
 
 pub unsafe fn render_set_vertex_buffer(encoder: i32, slot: i32, buffer: i32) {
-    in_render(encoder, |pass, c| {
-        c.gpu_render_pass_encoder_set_vertex_buffer(
+    in_render(encoder, |pass, s| {
+        s.commands.gpu_render_pass_encoder_set_vertex_buffer(
             pass,
             &(slot.max(0) as u32),
             &Some(handle(buffer)),
@@ -1263,20 +2200,65 @@ pub unsafe fn render_set_vertex_buffer(encoder: i32, slot: i32, buffer: i32) {
     });
 }
 
-pub unsafe fn render_set_index_buffer(encoder: i32, buffer: i32, format: i32) {
-    let format = if format == 1 {
-        wire::GPUIndexFormat::Uint32
-    } else {
-        wire::GPUIndexFormat::Uint16
+pub unsafe fn render_set_vertex_buffer_range(
+    encoder: i32,
+    slot: i32,
+    buffer: i32,
+    offset: i64,
+    size: i64,
+) {
+    let (Some(slot), Some((offset, size))) = (unsigned(slot, "vertex buffer slot"), range(offset, size))
+    else {
+        return;
     };
-    in_render(encoder, |pass, c| {
-        c.gpu_render_pass_encoder_set_index_buffer(pass, &handle(buffer), &format, &None, &None)
+    rendering(encoder, |pass, s| {
+        if s.buffers.get(buffer).is_some() {
+            s.commands.gpu_render_pass_encoder_set_vertex_buffer(
+                pass,
+                &slot,
+                &Some(handle(buffer)),
+                &Some(offset),
+                &size,
+            );
+        }
+    });
+}
+
+pub unsafe fn render_set_index_buffer(encoder: i32, buffer: i32, format: i32) {
+    let format = index_format(format);
+    in_render(encoder, |pass, s| {
+        s.commands
+            .gpu_render_pass_encoder_set_index_buffer(pass, &handle(buffer), &format, &None, &None)
+    });
+}
+
+pub unsafe fn render_set_index_buffer_range(
+    encoder: i32,
+    buffer: i32,
+    format: i32,
+    offset: i64,
+    size: i64,
+) {
+    let format = index_format(format);
+    let Some((offset, size)) = range(offset, size) else {
+        return;
+    };
+    rendering(encoder, |pass, s| {
+        if s.buffers.get(buffer).is_some() {
+            s.commands.gpu_render_pass_encoder_set_index_buffer(
+                pass,
+                &handle(buffer),
+                &format,
+                &Some(offset),
+                &size,
+            );
+        }
     });
 }
 
 pub unsafe fn render_set_bind_group(encoder: i32, group: i32, bind_group: i32) {
-    in_render(encoder, |pass, c| {
-        c.gpu_render_pass_encoder_set_bind_group(
+    in_render(encoder, |pass, s| {
+        s.commands.gpu_render_pass_encoder_set_bind_group(
             pass,
             &(group.max(0) as u32),
             &Some(handle(bind_group)),
@@ -1285,9 +2267,80 @@ pub unsafe fn render_set_bind_group(encoder: i32, group: i32, bind_group: i32) {
     });
 }
 
+pub unsafe fn render_set_bind_group_offsets(
+    encoder: i32,
+    group: i32,
+    bind_group: i32,
+    offsets: Buffer,
+    start: i64,
+    count: i32,
+) {
+    let Some(offsets) = dynamic_offsets(&offsets, start, count) else {
+        return;
+    };
+    in_render(encoder, |pass, s| {
+        s.commands.gpu_render_pass_encoder_set_bind_group(
+            pass,
+            &(group.max(0) as u32),
+            &Some(handle(bind_group)),
+            &Some(offsets),
+        )
+    });
+}
+
+pub unsafe fn render_set_viewport(
+    encoder: i32,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    min_depth: f64,
+    max_depth: f64,
+) {
+    in_render(encoder, |pass, s| {
+        s.commands.gpu_render_pass_encoder_set_viewport(
+            pass,
+            &(x as f32),
+            &(y as f32),
+            &(width as f32),
+            &(height as f32),
+            &(min_depth as f32),
+            &(max_depth as f32),
+        )
+    });
+}
+
+pub unsafe fn render_set_scissor_rect(encoder: i32, x: i32, y: i32, width: i32, height: i32) {
+    in_render(encoder, |pass, s| {
+        s.commands.gpu_render_pass_encoder_set_scissor_rect(
+            pass,
+            &(x.max(0) as u32),
+            &(y.max(0) as u32),
+            &(width.max(0) as u32),
+            &(height.max(0) as u32),
+        )
+    });
+}
+
+pub unsafe fn render_set_blend_constant(encoder: i32, r: f64, g: f64, b: f64, a: f64) {
+    in_render(encoder, |pass, s| {
+        s.commands.gpu_render_pass_encoder_set_blend_constant(
+            pass,
+            &wire::GPUColor::GPUColorDict(wire::GPUColorDict { r, g, b, a }),
+        )
+    });
+}
+
+pub unsafe fn render_set_stencil_reference(encoder: i32, reference: i32) {
+    in_render(encoder, |pass, s| {
+        s.commands
+            .gpu_render_pass_encoder_set_stencil_reference(pass, &(reference.max(0) as u32))
+    });
+}
+
 pub unsafe fn render_draw(encoder: i32, vertices: i32, instances: i32) {
-    in_render(encoder, |pass, c| {
-        c.gpu_render_pass_encoder_draw(
+    in_render(encoder, |pass, s| {
+        s.commands.gpu_render_pass_encoder_draw(
             pass,
             &(vertices.max(0) as u32),
             &Some(instances.max(1) as u32),
@@ -1297,9 +2350,35 @@ pub unsafe fn render_draw(encoder: i32, vertices: i32, instances: i32) {
     });
 }
 
+pub unsafe fn render_draw_range(
+    encoder: i32,
+    vertex_count: i32,
+    instance_count: i32,
+    first_vertex: i32,
+    first_instance: i32,
+) {
+    let (Some(vertices), Some(instances), Some(first), Some(first_instance)) = (
+        unsigned(vertex_count, "vertex count"),
+        unsigned(instance_count, "instance count"),
+        unsigned(first_vertex, "first vertex"),
+        unsigned(first_instance, "first instance"),
+    ) else {
+        return;
+    };
+    rendering(encoder, |pass, s| {
+        s.commands.gpu_render_pass_encoder_draw(
+            pass,
+            &vertices,
+            &Some(instances),
+            &Some(first),
+            &Some(first_instance),
+        )
+    });
+}
+
 pub unsafe fn render_draw_indexed(encoder: i32, indices: i32, instances: i32) {
-    in_render(encoder, |pass, c| {
-        c.gpu_render_pass_encoder_draw_indexed(
+    in_render(encoder, |pass, s| {
+        s.commands.gpu_render_pass_encoder_draw_indexed(
             pass,
             &(indices.max(0) as u32),
             &Some(instances.max(1) as u32),
@@ -1310,8 +2389,194 @@ pub unsafe fn render_draw_indexed(encoder: i32, indices: i32, instances: i32) {
     });
 }
 
+pub unsafe fn render_draw_indexed_range(
+    encoder: i32,
+    index_count: i32,
+    instance_count: i32,
+    first_index: i32,
+    base_vertex: i32,
+    first_instance: i32,
+) {
+    let (Some(indices), Some(instances), Some(first), Some(first_instance)) = (
+        unsigned(index_count, "index count"),
+        unsigned(instance_count, "instance count"),
+        unsigned(first_index, "first index"),
+        unsigned(first_instance, "first instance"),
+    ) else {
+        return;
+    };
+    rendering(encoder, |pass, s| {
+        s.commands.gpu_render_pass_encoder_draw_indexed(
+            pass,
+            &indices,
+            &Some(instances),
+            &Some(first),
+            &Some(base_vertex),
+            &Some(first_instance),
+        )
+    });
+}
+
+pub unsafe fn render_draw_indirect(encoder: i32, buffer: i32, offset: i64) {
+    in_render(encoder, |pass, s| {
+        if s.buffers.get(buffer).is_some() {
+            s.commands.gpu_render_pass_encoder_draw_indirect(
+                pass,
+                &handle(buffer),
+                &(offset.max(0) as u64),
+            );
+        }
+    });
+}
+
+pub unsafe fn render_draw_indexed_indirect(encoder: i32, buffer: i32, offset: i64) {
+    in_render(encoder, |pass, s| {
+        if s.buffers.get(buffer).is_some() {
+            s.commands.gpu_render_pass_encoder_draw_indexed_indirect(
+                pass,
+                &handle(buffer),
+                &(offset.max(0) as u64),
+            );
+        }
+    });
+}
+
+/// Counted into the query set the pass was begun with.
+pub unsafe fn render_begin_occlusion_query(encoder: i32, index_of: i32) {
+    let Some(query) = unsigned(index_of, "query index") else {
+        return;
+    };
+    rendering(encoder, |pass, s| {
+        s.commands
+            .gpu_render_pass_encoder_begin_occlusion_query(pass, &query)
+    });
+}
+
+pub unsafe fn render_end_occlusion_query(encoder: i32) {
+    rendering(encoder, |pass, s| {
+        s.commands.gpu_render_pass_encoder_end_occlusion_query(pass)
+    });
+}
+
+pub unsafe fn render_execute_bundle(encoder: i32, bundle: i32) {
+    rendering(encoder, |pass, s| {
+        if s.bundles.get(bundle).is_some() {
+            s.commands
+                .gpu_render_pass_encoder_execute_bundles(pass, &vec![handle(bundle)]);
+        }
+    });
+}
+
 pub unsafe fn encoder_render_end(encoder: i32) {
     encoding(encoder, end_pass);
+}
+
+// -- render bundles ---------------------------------------------------------
+
+/// The bundle encoder's commands, when it is live.
+fn bundling(encoder: i32, body: impl FnOnce(Handle, &mut State)) {
+    let mut s = state();
+    if s.bundle_encoders.get(encoder).is_some() {
+        body(handle(encoder), &mut s);
+    }
+}
+
+pub unsafe fn bundle_set_bind_group(encoder: i32, group: i32, bind_group: i32) {
+    let Some(group) = unsigned(group, "bind group index") else {
+        return;
+    };
+    bundling(encoder, |this, s| {
+        if s.bind_groups.get(bind_group).is_some() {
+            s.commands.gpu_render_bundle_encoder_set_bind_group(
+                this,
+                &group,
+                &Some(handle(bind_group)),
+                &None,
+            );
+        }
+    });
+}
+
+pub unsafe fn bundle_set_bind_group_offsets(
+    encoder: i32,
+    group: i32,
+    bind_group: i32,
+    offsets: Buffer,
+    start: i64,
+    count: i32,
+) {
+    let Some(group) = unsigned(group, "bind group index") else {
+        return;
+    };
+    let Some(offsets) = dynamic_offsets(&offsets, start, count) else {
+        return;
+    };
+    bundling(encoder, |this, s| {
+        if s.bind_groups.get(bind_group).is_some() {
+            s.commands.gpu_render_bundle_encoder_set_bind_group(
+                this,
+                &group,
+                &Some(handle(bind_group)),
+                &Some(offsets),
+            );
+        }
+    });
+}
+
+pub unsafe fn bundle_set_vertex_buffer(
+    encoder: i32,
+    slot: i32,
+    buffer: i32,
+    offset: i64,
+    size: i64,
+) {
+    let (Some(slot), Some((offset, size))) = (unsigned(slot, "vertex buffer slot"), range(offset, size))
+    else {
+        return;
+    };
+    bundling(encoder, |this, s| {
+        if s.buffers.get(buffer).is_some() {
+            s.commands.gpu_render_bundle_encoder_set_vertex_buffer(
+                this,
+                &slot,
+                &Some(handle(buffer)),
+                &Some(offset),
+                &size,
+            );
+        }
+    });
+}
+
+pub unsafe fn bundle_set_index_buffer(
+    encoder: i32,
+    buffer: i32,
+    format: i32,
+    offset: i64,
+    size: i64,
+) {
+    let format = index_format(format);
+    let Some((offset, size)) = range(offset, size) else {
+        return;
+    };
+    bundling(encoder, |this, s| {
+        if s.buffers.get(buffer).is_some() {
+            s.commands.gpu_render_bundle_encoder_set_index_buffer(
+                this,
+                &handle(buffer),
+                &format,
+                &Some(offset),
+                &size,
+            );
+        }
+    });
+}
+
+pub unsafe fn bundle_encoder_destroy(encoder: i32) {
+    forget(|s| s.bundle_encoders.remove(encoder), encoder);
+}
+
+pub unsafe fn bundle_destroy(bundle: i32) {
+    forget(|s| s.bundles.remove(bundle), bundle);
 }
 
 // -- textures ---------------------------------------------------------------
@@ -1411,10 +2676,6 @@ fn configure(
     view_formats: &[i32],
     alpha: Option<i32>,
 ) {
-    let mut s = state();
-    if s.devices.get(device).is_none() || s.surfaces.get(surface).is_none() {
-        return;
-    }
     let Some(format) = wire::GPUTextureFormat::from_index(format as u32) else {
         host::raise(
             ErrorKind::Runtime,
@@ -1422,6 +2683,10 @@ fn configure(
         );
         return;
     };
+    let mut s = state();
+    if s.devices.get(device).is_none() || s.surfaces.get(surface).is_none() {
+        return;
+    }
     let view_formats = view_formats
         .iter()
         .filter_map(|&f| wire::GPUTextureFormat::from_index(f as u32))
@@ -1526,7 +2791,7 @@ const CANVAS_USAGES: i32 = 0x01 | 0x02 | 0x04 | 0x10;
 /// What WebGPU lets a canvas be configured with: the browser's preferred
 /// format first, then the others a canvas takes.
 pub unsafe fn surface_capabilities(surface: i32, adapter: i32) -> i32 {
-    let preferred = surface_preferred_format(surface, adapter);
+    let preferred = unsafe { surface_preferred_format(surface, adapter) };
     let mut s = state();
     if s.surfaces.get(surface).is_none() || s.adapters.get(adapter).is_none() {
         return 0;
@@ -1880,48 +3145,483 @@ pub unsafe fn render_pipeline_build(builder: i32) -> i32 {
     )
 }
 
+// -- texture uploads ----------------------------------------------------------
+
+/// `height` rows of `bytes_per_row` bytes into mip level zero.
+pub unsafe fn queue_write_texture(
+    queue: i32,
+    texture: i32,
+    data: Buffer,
+    width: i32,
+    height: i32,
+    bytes_per_row: i32,
+) {
+    if width <= 0 || height <= 0 || bytes_per_row <= 0 {
+        host::raise(ErrorKind::Type, "texture upload dimensions must be positive");
+        return;
+    }
+    let Some(len) = bytes_per_row.checked_mul(height) else {
+        host::raise(ErrorKind::Type, "texture upload size overflow");
+        return;
+    };
+    let Some(data) = bytes(&data, len) else {
+        return;
+    };
+    let mut s = state();
+    if s.queues.get(queue).is_none() || s.textures.get(texture).is_none() {
+        return;
+    }
+    let staged = s.stage(data);
+    s.commands.gpu_queue_write_texture(
+        handle(queue),
+        &whole(texture),
+        &staged,
+        &rows(bytes_per_row, height),
+        &extent(width, height),
+    );
+    s.flush_if_full();
+}
+
+/// The whole shared buffer, read through `layout`.
+pub unsafe fn queue_write_texture_with(
+    queue: i32,
+    destination: &GpuTexelCopyTextureInfo,
+    data: Buffer,
+    layout: &GpuTexelCopyBufferLayout,
+    size: &GpuExtent3D,
+) {
+    let (Some(destination), Some(layout), Some(size)) = (
+        converted(destination.wire()),
+        converted(layout.wire()),
+        extent_of(size),
+    ) else {
+        return;
+    };
+    let mut s = state();
+    if s.queues.get(queue).is_none() {
+        return;
+    }
+    let staged = s.stage(unsafe { data.as_slice() });
+    s.commands
+        .gpu_queue_write_texture(handle(queue), &destination, &staged, &layout, &size);
+    s.flush_if_full();
+}
+
+/// WebGPU's timestamps count nanoseconds.
+pub unsafe fn queue_timestamp_period(queue: i32) -> f64 {
+    if state().queues.get(queue).is_some() { 1.0 } else { 0.0 }
+}
+
+// -- features and limits ----------------------------------------------------
+
+/// The names in the GPUSupportedFeatures `get` puts under a handle.
+fn feature_names(get: impl FnOnce(&mut wire::Encoder, Handle)) -> Vec<String> {
+    let mut s = state();
+    let features = s.transient();
+    get(&mut s.commands, features);
+    let names = answer::<Vec<String>>(&mut s, |c, at| {
+        c.gpu_supported_features_values(features, at)
+    });
+    s.commands.release(features);
+    names.unwrap_or_default()
+}
+
+/// Whether `names` holds the feature `which` names, the plugin's code being
+/// its index in the IDL. The wire names each enum value as its string
+/// spelled in PascalCase.
+fn has_feature(names: &[String], which: i32) -> bool {
+    let Some(feature) = wire::GPUFeatureName::from_index(which as u32) else {
+        return false;
+    };
+    let variant = format!("{feature:?}");
+    names.iter().any(|name| {
+        let pascal: String = name
+            .split('-')
+            .map(|word| {
+                let mut chars = word.chars();
+                chars.next().map_or_else(String::new, |first| {
+                    first.to_ascii_uppercase().to_string() + chars.as_str()
+                })
+            })
+            .collect();
+        pascal == variant
+    })
+}
+
+pub unsafe fn adapter_feature(adapter: i32, which: i32) -> bool {
+    if state().adapters.get(adapter).is_none() {
+        return false;
+    }
+    let names = feature_names(|c, h| c.gpu_adapter_get_features(handle(adapter), h));
+    has_feature(&names, which)
+}
+
+pub unsafe fn device_feature(device: i32, which: i32) -> bool {
+    if state().devices.get(device).is_none() {
+        return false;
+    }
+    let names = feature_names(|c, h| c.gpu_device_get_features(handle(device), h));
+    has_feature(&names, which)
+}
+
+/// GPUSupportedLimits' attribute for the plugin's Limit `which`.
+fn limit_getter(which: i32) -> Option<fn(&mut wire::Encoder, Handle, u32)> {
+    use crate::Limit::*;
+    type E = wire::Encoder;
+    Some(match crate::Limit::from_native(which)? {
+        MaxTextureDimension1D => E::gpu_supported_limits_get_max_texture_dimension1d,
+        MaxTextureDimension2D => E::gpu_supported_limits_get_max_texture_dimension2d,
+        MaxTextureDimension3D => E::gpu_supported_limits_get_max_texture_dimension3d,
+        MaxTextureArrayLayers => E::gpu_supported_limits_get_max_texture_array_layers,
+        MaxBindGroups => E::gpu_supported_limits_get_max_bind_groups,
+        MaxBindGroupsPlusVertexBuffers => {
+            E::gpu_supported_limits_get_max_bind_groups_plus_vertex_buffers
+        }
+        MaxImmediateSize => E::gpu_supported_limits_get_max_immediate_size,
+        MaxBindingsPerBindGroup => E::gpu_supported_limits_get_max_bindings_per_bind_group,
+        MaxDynamicUniformBuffersPerPipelineLayout => {
+            E::gpu_supported_limits_get_max_dynamic_uniform_buffers_per_pipeline_layout
+        }
+        MaxDynamicStorageBuffersPerPipelineLayout => {
+            E::gpu_supported_limits_get_max_dynamic_storage_buffers_per_pipeline_layout
+        }
+        MaxSampledTexturesPerShaderStage => {
+            E::gpu_supported_limits_get_max_sampled_textures_per_shader_stage
+        }
+        MaxSamplersPerShaderStage => E::gpu_supported_limits_get_max_samplers_per_shader_stage,
+        MaxStorageBuffersPerShaderStage => {
+            E::gpu_supported_limits_get_max_storage_buffers_per_shader_stage
+        }
+        MaxStorageBuffersInVertexStage => {
+            E::gpu_supported_limits_get_max_storage_buffers_in_vertex_stage
+        }
+        MaxStorageBuffersInFragmentStage => {
+            E::gpu_supported_limits_get_max_storage_buffers_in_fragment_stage
+        }
+        MaxStorageTexturesPerShaderStage => {
+            E::gpu_supported_limits_get_max_storage_textures_per_shader_stage
+        }
+        MaxStorageTexturesInVertexStage => {
+            E::gpu_supported_limits_get_max_storage_textures_in_vertex_stage
+        }
+        MaxStorageTexturesInFragmentStage => {
+            E::gpu_supported_limits_get_max_storage_textures_in_fragment_stage
+        }
+        MaxUniformBuffersPerShaderStage => {
+            E::gpu_supported_limits_get_max_uniform_buffers_per_shader_stage
+        }
+        MaxUniformBufferBindingSize => E::gpu_supported_limits_get_max_uniform_buffer_binding_size,
+        MaxStorageBufferBindingSize => E::gpu_supported_limits_get_max_storage_buffer_binding_size,
+        MinUniformBufferOffsetAlignment => {
+            E::gpu_supported_limits_get_min_uniform_buffer_offset_alignment
+        }
+        MinStorageBufferOffsetAlignment => {
+            E::gpu_supported_limits_get_min_storage_buffer_offset_alignment
+        }
+        MaxVertexBuffers => E::gpu_supported_limits_get_max_vertex_buffers,
+        MaxBufferSize => E::gpu_supported_limits_get_max_buffer_size,
+        MaxVertexAttributes => E::gpu_supported_limits_get_max_vertex_attributes,
+        MaxVertexBufferArrayStride => E::gpu_supported_limits_get_max_vertex_buffer_array_stride,
+        MaxInterStageShaderVariables => {
+            E::gpu_supported_limits_get_max_inter_stage_shader_variables
+        }
+        MaxColorAttachments => E::gpu_supported_limits_get_max_color_attachments,
+        MaxColorAttachmentBytesPerSample => {
+            E::gpu_supported_limits_get_max_color_attachment_bytes_per_sample
+        }
+        MaxComputeWorkgroupStorageSize => {
+            E::gpu_supported_limits_get_max_compute_workgroup_storage_size
+        }
+        MaxComputeInvocationsPerWorkgroup => {
+            E::gpu_supported_limits_get_max_compute_invocations_per_workgroup
+        }
+        MaxComputeWorkgroupSizeX => E::gpu_supported_limits_get_max_compute_workgroup_size_x,
+        MaxComputeWorkgroupSizeY => E::gpu_supported_limits_get_max_compute_workgroup_size_y,
+        MaxComputeWorkgroupSizeZ => E::gpu_supported_limits_get_max_compute_workgroup_size_z,
+        MaxComputeWorkgroupsPerDimension => {
+            E::gpu_supported_limits_get_max_compute_workgroups_per_dimension
+        }
+    })
+}
+
+/// Limit `which` of the GPUSupportedLimits `get` puts under a handle; -1
+/// for a limit the plugin or the browser does not know. The wire carries an
+/// unsigned long as four bytes and an unsigned long long as eight.
+fn limit(which: i32, get: impl FnOnce(&mut wire::Encoder, Handle)) -> i64 {
+    let Some(getter) = limit_getter(which) else {
+        return -1;
+    };
+    let mut s = state();
+    let limits = s.transient();
+    get(&mut s.commands, limits);
+    let mut bytes = [0u8; 8];
+    let reply = Reply::new(bytes.as_mut_ptr(), bytes.len());
+    getter(&mut s.commands, limits, reply.at());
+    s.commands.release(limits);
+    s.flush();
+    match (reply.state.load(SeqCst), reply.len) {
+        (1, 4) => i64::from(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
+        (1, 8) => u64::from_le_bytes(bytes).min(i64::MAX as u64) as i64,
+        _ => -1,
+    }
+}
+
+pub unsafe fn adapter_limit(adapter: i32, which: i32) -> i64 {
+    if state().adapters.get(adapter).is_none() {
+        return 0;
+    }
+    limit(which, |c, h| c.gpu_adapter_get_limits(handle(adapter), h))
+}
+
+pub unsafe fn device_limit(device: i32, which: i32) -> i64 {
+    if state().devices.get(device).is_none() {
+        return 0;
+    }
+    limit(which, |c, h| c.gpu_device_get_limits(handle(device), h))
+}
+
+// -- compilation messages ---------------------------------------------------
+
+/// One of a GPUCompilationInfo's messages. Its kind is the plugin's
+/// CompilationMessageType, GPUCompilationMessageType's index.
+#[derive(Clone)]
+struct Message {
+    text: String,
+    kind: i32,
+    line: i64,
+    column: i64,
+    offset: i64,
+    length: i64,
+}
+
+/// The most objects one sequence may hand back.
+const SEQUENCE: u32 = 1 << 16;
+
+/// A message attribute that is an unsigned long long.
+fn number(s: &mut State, get: fn(&mut wire::Encoder, Handle, u32), message: Handle) -> i64 {
+    answer::<u64>(s, |c, at| get(c, message, at)).map_or(0, |n| n.min(i64::MAX as u64) as i64)
+}
+
+/// The messages of the GPUCompilationInfo under `info`. The agent keeps
+/// them under transient handles in a row from the first, which are read and
+/// released.
+fn read_messages(s: &mut State, info: Handle) -> Vec<Message> {
+    if s.next + SEQUENCE >= TRANSIENT {
+        s.next = 2;
+    }
+    let first = s.transient();
+    let count = answer::<u32>(s, |c, at| {
+        c.gpu_compilation_info_get_messages(info, first, at)
+    })
+    .unwrap_or(0)
+    .min(SEQUENCE - 1);
+    s.next = first.0 + count;
+    let mut messages = Vec::new();
+    for i in 0..count {
+        let m = Handle(first.0 + i);
+        let text = answer::<String>(s, |c, at| c.gpu_compilation_message_get_message(m, at))
+            .unwrap_or_default();
+        let kind = answer::<wire::GPUCompilationMessageType>(s, |c, at| {
+            c.gpu_compilation_message_get_type(m, at)
+        })
+        .map_or(0, |kind| kind as i32);
+        messages.push(Message {
+            text,
+            kind,
+            line: number(s, wire::Encoder::gpu_compilation_message_get_line_num, m),
+            column: number(s, wire::Encoder::gpu_compilation_message_get_line_pos, m),
+            offset: number(s, wire::Encoder::gpu_compilation_message_get_offset, m),
+            length: number(s, wire::Encoder::gpu_compilation_message_get_length, m),
+        });
+        s.commands.release(m);
+    }
+    messages
+}
+
+/// The messages of compilation info `info`, read from the agent the first
+/// time they are asked for.
+fn messages(info: i32) -> Option<Vec<Message>> {
+    let mut s = state();
+    s.compilations.get(info)?;
+    if let Some((_, read)) = s.compiled.iter().find(|(owner, _)| *owner == info) {
+        return Some(read.clone());
+    }
+    let read = read_messages(&mut s, handle(info));
+    s.compiled.push((info, read.clone()));
+    Some(read)
+}
+
+/// The `index_of`th message's value, or a raised type error out of range.
+fn message<T: Default>(info: i32, index_of: i32, read: impl FnOnce(&Message) -> T) -> T {
+    let Some(messages) = messages(info) else {
+        return T::default();
+    };
+    match usize::try_from(index_of).ok().and_then(|i| messages.get(i)) {
+        Some(found) => read(found),
+        None => {
+            host::raise(ErrorKind::Type, "compilation message index out of range");
+            T::default()
+        }
+    }
+}
+
+pub unsafe fn compilation_count(info: i32) -> i32 {
+    messages(info).map_or(0, |m| m.len() as i32)
+}
+
+pub unsafe fn compilation_message(info: i32, index_of: i32) -> Text {
+    match message(info, index_of, |m| Some(m.text.clone())) {
+        Some(text) => Text::new(&text),
+        None => Text::NULL,
+    }
+}
+
+pub unsafe fn compilation_type(info: i32, index_of: i32) -> i32 {
+    message(info, index_of, |m| m.kind)
+}
+
+pub unsafe fn compilation_line(info: i32, index_of: i32) -> i64 {
+    message(info, index_of, |m| m.line)
+}
+
+pub unsafe fn compilation_column(info: i32, index_of: i32) -> i64 {
+    message(info, index_of, |m| m.column)
+}
+
+pub unsafe fn compilation_offset(info: i32, index_of: i32) -> i64 {
+    message(info, index_of, |m| m.offset)
+}
+
+pub unsafe fn compilation_length(info: i32, index_of: i32) -> i64 {
+    message(info, index_of, |m| m.length)
+}
+
+/// The compiler's messages about `shader`, asked for once and kept. The
+/// first ask waits for the browser to have compiled it.
+fn shader_info(shader: i32) -> Option<Vec<Message>> {
+    let mut s = state();
+    s.shaders.get(shader)?;
+    if let Some((_, kept)) = s.shader_infos.iter().find(|(owner, _)| *owner == shader) {
+        return Some(kept.clone());
+    }
+    let info = s.transient();
+    let promise = Promise::new();
+    s.commands
+        .gpu_shader_module_get_compilation_info(handle(shader), info, promise.reply.at());
+    s.flush();
+    drop(s);
+    answered(&[&promise.reply]);
+    let mut s = state();
+    let messages = if promise.reply.state.load(SeqCst) == 1 {
+        read_messages(&mut s, info)
+    } else {
+        Vec::new()
+    };
+    s.commands.release(info);
+    s.shader_infos.push((shader, messages.clone()));
+    Some(messages)
+}
+
+pub unsafe fn shader_compilation_info(shader: i32) -> Future<crate::GpuCompilationInfo> {
+    let Some(messages) = shader_info(shader) else {
+        return rejected("shader module was destroyed");
+    };
+    let info = {
+        let mut s = state();
+        let info = s.compilations.put(());
+        s.compiled.push((info, messages));
+        info
+    };
+    let future = Future::new();
+    if !future.resolve_boxed(Box::new(crate::GpuCompilationInfo { handle: info })) {
+        unsafe { compilation_destroy(info) };
+    }
+    future
+}
+
+/// One message a line, as `line N: what`, or null if the compiler said
+/// nothing.
+pub unsafe fn shader_messages(shader: i32) -> Text {
+    let messages = shader_info(shader).unwrap_or_default();
+    if messages.is_empty() {
+        return Text::NULL;
+    }
+    let text = messages
+        .iter()
+        .map(|m| match m.line {
+            0 => m.text.clone(),
+            line => format!("line {line}: {}", m.text),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Text::new(&text)
+}
+
+// -- objects WebGPU frees itself ----------------------------------------------
+
+pub unsafe fn sampler_destroy(sampler: i32) {
+    forget(|s| s.samplers.remove(sampler), sampler);
+}
+
+pub unsafe fn pipeline_layout_destroy(layout: i32) {
+    forget(|s| s.pipeline_layouts.remove(layout), layout);
+}
+
+pub unsafe fn lost_destroy(info: i32) {
+    forget(|s| s.lost_infos.remove(info), info);
+}
+
+pub unsafe fn compilation_destroy(info: i32) {
+    forget(
+        |s| {
+            s.compilations.remove(info);
+            s.compiled.retain(|(owner, _)| *owner != info);
+        },
+        info,
+    );
+}
+
+// -- members the declaration holds its own way ------------------------------
+//
+// The declaration's AttachmentView for WebIDL's GPUTextureOrGPUTextureView,
+// which the generated conversion calls these for.
+
+fn attachment(view: &AttachmentView) -> wire::GPUTextureOrGPUTextureView {
+    match view {
+        AttachmentView::Texture(texture) => {
+            wire::GPUTextureOrGPUTextureView::GPUTexture(handle(*texture))
+        }
+        AttachmentView::TextureView(view) => {
+            wire::GPUTextureOrGPUTextureView::GPUTextureView(handle(*view))
+        }
+    }
+}
+
+pub fn gpu_render_pass_color_attachment_view(
+    view: &Option<AttachmentView>,
+) -> Result<wire::GPUTextureOrGPUTextureView, String> {
+    view.as_ref()
+        .map(attachment)
+        .ok_or_else(|| "a colour attachment has no view".to_owned())
+}
+
+pub fn gpu_render_pass_color_attachment_resolve_target(
+    target: &Option<AttachmentView>,
+) -> Result<Option<wire::GPUTextureOrGPUTextureView>, String> {
+    Ok(target.as_ref().map(attachment))
+}
+
+pub fn gpu_render_pass_depth_stencil_attachment_view(
+    view: &Option<AttachmentView>,
+) -> Result<wire::GPUTextureOrGPUTextureView, String> {
+    view.as_ref()
+        .map(attachment)
+        .ok_or_else(|| "a depth attachment has no view".to_owned())
+}
+
 // -- validity ---------------------------------------------------------------
 
 /// Whether `h` is a live handle of the kind it carries.
 pub unsafe fn is_valid(h: i32) -> bool {
-    let s = state();
-    let k = kind_of(h);
-    let is = |kind: Kind| k == kind as i32;
-    if is(Kind::Instance) {
-        s.instances.get(h).is_some()
-    } else if is(Kind::Adapter) {
-        s.adapters.get(h).is_some()
-    } else if is(Kind::Device) {
-        s.devices.get(h).is_some()
-    } else if is(Kind::Queue) {
-        s.queues.get(h).is_some()
-    } else if is(Kind::Buffer) {
-        s.buffers.get(h).is_some()
-    } else if is(Kind::Shader) {
-        s.shaders.get(h).is_some()
-    } else if is(Kind::Pipeline) {
-        s.pipelines.get(h).is_some()
-    } else if is(Kind::Renderpipeline) {
-        s.render_pipelines.get(h).is_some()
-    } else if is(Kind::BindGroupLayout) {
-        s.layouts.get(h).is_some()
-    } else if is(Kind::Bindgroup) {
-        s.bind_groups.get(h).is_some()
-    } else if is(Kind::Encoder) {
-        s.encoders.get(h).is_some()
-    } else if is(Kind::Bindings) {
-        s.bindings.get(h).is_some()
-    } else if is(Kind::Texture) {
-        s.textures.get(h).is_some()
-    } else if is(Kind::View) {
-        s.views.get(h).is_some()
-    } else if is(Kind::Surface) {
-        s.surfaces.get(h).is_some()
-    } else if is(Kind::SurfaceCapabilities) {
-        s.capabilities.get(h).is_some()
-    } else if is(Kind::Builder) {
-        s.builders.get(h).is_some()
-    } else {
-        false
-    }
+    state().has(h)
 }

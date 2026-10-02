@@ -792,13 +792,16 @@ trait GpuDevice {
     fn texture(this: &GpuDevice, descriptor: &GpuTextureDescriptor) -> Box<GpuTexture>;
     #[native(pipeline_begin)]
     fn pipeline(this: &GpuDevice) -> Box<GpuPipelineBuilder>;
+    #[idl("GPUDevice.createSampler")]
     #[native(sampler_create)]
     fn sampler(this: &GpuDevice, descriptor: &GpuSamplerDescriptor) -> Box<GpuSampler>;
+    #[idl("GPUDevice.createBindGroupLayout")]
     #[native(bind_group_layout_create)]
     fn createBindGroupLayout(
         this: &GpuDevice,
         descriptor: &GpuBindGroupLayoutDescriptor,
     ) -> Box<GpuBindGroupLayout>;
+    #[idl("GPUDevice.createPipelineLayout")]
     #[native(pipeline_layout_create)]
     fn createPipelineLayout(
         this: &GpuDevice,
@@ -811,6 +814,7 @@ trait GpuDevice {
         this: &GpuDevice,
         descriptor: &GpuComputePipelineDescriptor,
     ) -> Box<GpuPipeline>;
+    #[idl("GPUDevice.createComputePipelineAsync")]
     #[native(compute_pipeline_create_async)]
     fn createComputePipelineAsync(
         this: &GpuDevice,
@@ -821,13 +825,16 @@ trait GpuDevice {
         this: &GpuDevice,
         descriptor: &GpuRenderPipelineDescriptor,
     ) -> Box<GpuPipeline>;
+    #[idl("GPUDevice.createRenderPipelineAsync")]
     #[native(render_pipeline_create_async)]
     fn createRenderPipelineAsync(
         this: &GpuDevice,
         descriptor: &GpuRenderPipelineDescriptor,
     ) -> Future<GpuPipeline>;
+    #[idl("GPUDevice.createQuerySet")]
     #[native(query_set_create)]
     fn createQuerySet(this: &GpuDevice, descriptor: &GpuQuerySetDescriptor) -> Box<GpuQuerySet>;
+    #[idl("GPUDevice.createRenderBundleEncoder")]
     #[native(bundle_encoder_create)]
     fn createRenderBundleEncoder(
         this: &GpuDevice,
@@ -844,6 +851,7 @@ trait GpuDevice {
     fn pushErrorScope(this: &GpuDevice, filter: Enum<ErrorFilter>);
     #[native(error_scope_pop)]
     fn popErrorScope(this: &GpuDevice) -> Future<GpuError>;
+    #[idl("GPUDevice.lost")]
     #[native(device_lost)]
     fn lost(this: &GpuDevice) -> Future<GpuDeviceLostInfo>;
     #[native(mesh_pipeline_create)]
@@ -945,6 +953,7 @@ trait GpuShader {
     fn destroy(this: &GpuShader);
     #[native(shader_messages)]
     fn messages(this: &GpuShader) -> Text;
+    #[idl("GPUShaderModule.getCompilationInfo")]
     #[native(shader_compilation_info)]
     fn getCompilationInfo(this: &GpuShader) -> Future<GpuCompilationInfo>;
 }
@@ -1286,20 +1295,28 @@ trait GpuTexture {
     fn createView(this: &GpuTexture, descriptor: &GpuTextureViewDescriptor) -> Box<GpuTextureView>;
     #[native(texture_destroy)]
     fn destroy(this: &GpuTexture);
+    #[idl("GPUTexture.width")]
     #[native(texture_width)]
     fn width(this: &GpuTexture) -> i32;
+    #[idl("GPUTexture.height")]
     #[native(texture_height)]
     fn height(this: &GpuTexture) -> i32;
+    #[idl("GPUTexture.depthOrArrayLayers")]
     #[native(texture_depth_or_array_layers)]
     fn depthOrArrayLayers(this: &GpuTexture) -> i32;
+    #[idl("GPUTexture.mipLevelCount")]
     #[native(texture_mip_level_count)]
     fn mipLevelCount(this: &GpuTexture) -> i32;
+    #[idl("GPUTexture.sampleCount")]
     #[native(texture_sample_count)]
     fn sampleCount(this: &GpuTexture) -> i32;
+    #[idl("GPUTexture.dimension")]
     #[native(texture_get_dimension)]
     fn dimension(this: &GpuTexture) -> Enum<TextureDimension>;
+    #[idl("GPUTexture.format")]
     #[native(texture_get_format)]
     fn format(this: &GpuTexture) -> Enum<TextureFormat>;
+    #[idl("GPUTexture.usage")]
     #[native(texture_usage)]
     fn usage(this: &GpuTexture) -> i32;
 }
@@ -1392,10 +1409,13 @@ trait GpuSurface {
 trait GpuQuerySet {
     #[native(is_valid)]
     fn valid(this: &GpuQuerySet) -> bool;
+    #[idl("GPUQuerySet.destroy")]
     #[native(query_set_destroy)]
     fn destroy(this: &GpuQuerySet);
+    #[idl("GPUQuerySet.count")]
     #[native(query_set_count)]
     fn count(this: &GpuQuerySet) -> i32;
+    #[idl("GPUQuerySet.type")]
     #[native(query_set_type)]
     fn queryType(this: &GpuQuerySet) -> Enum<QueryType>;
 }
@@ -1408,6 +1428,7 @@ trait GpuRenderBundleEncoder {
     fn valid(this: &GpuRenderBundleEncoder) -> bool;
     #[native(bundle_encoder_destroy)]
     fn destroy(this: &GpuRenderBundleEncoder);
+    #[idl("GPURenderBundleEncoder.setPipeline")]
     #[native(bundle_set_pipeline)]
     fn setPipeline(this: &GpuRenderBundleEncoder, pipeline: &GpuPipeline);
     #[native(bundle_set_bind_group)]
@@ -1437,6 +1458,7 @@ trait GpuRenderBundleEncoder {
         offset: i64,
         size: i64,
     );
+    #[idl("GPURenderBundleEncoder.draw")]
     #[native(bundle_draw)]
     fn draw(
         this: &GpuRenderBundleEncoder,
@@ -1445,6 +1467,7 @@ trait GpuRenderBundleEncoder {
         first_vertex: i32,
         first_instance: i32,
     );
+    #[idl("GPURenderBundleEncoder.drawIndexed")]
     #[native(bundle_draw_indexed)]
     fn drawIndexed(
         this: &GpuRenderBundleEncoder,
@@ -1454,10 +1477,13 @@ trait GpuRenderBundleEncoder {
         base_vertex: i32,
         first_instance: i32,
     );
+    #[idl("GPURenderBundleEncoder.drawIndirect")]
     #[native(bundle_draw_indirect)]
     fn drawIndirect(this: &GpuRenderBundleEncoder, buffer: &GpuBuffer, offset: i64);
+    #[idl("GPURenderBundleEncoder.drawIndexedIndirect")]
     #[native(bundle_draw_indexed_indirect)]
     fn drawIndexedIndirect(this: &GpuRenderBundleEncoder, buffer: &GpuBuffer, offset: i64);
+    #[idl("GPURenderBundleEncoder.finish")]
     #[native(bundle_finish)]
     fn finish(this: &GpuRenderBundleEncoder) -> Box<GpuRenderBundle>;
 }
@@ -1488,8 +1514,10 @@ trait GpuDeviceLostInfo {
     fn valid(this: &GpuDeviceLostInfo) -> bool;
     #[native(lost_destroy)]
     fn destroy(this: &GpuDeviceLostInfo);
+    #[idl("GPUDeviceLostInfo.reason")]
     #[native(lost_reason)]
     fn reason(this: &GpuDeviceLostInfo) -> Enum<DeviceLostReason>;
+    #[idl("GPUDeviceLostInfo.message")]
     #[native(lost_message)]
     fn message(this: &GpuDeviceLostInfo) -> Text;
 }
