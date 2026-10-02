@@ -95,7 +95,7 @@ console.log(JSON.stringify({ log, replies: [state[0], state[4]], handles: [...wi
 #[test]
 fn rust_encodes_and_javascript_decodes_the_webgpu_wire() {
     let idl = xgpu_bindgen::WEBGPU_IDL;
-    let wire = xgpu_bindgen::wire::wire(idl).unwrap();
+    let wire = x_idl::wire::wire(idl).unwrap();
     let dir = std::env::temp_dir().join(format!("caribou-wire-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("gpu_wire.rs"), &wire.rust).unwrap();

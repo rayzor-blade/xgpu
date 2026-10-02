@@ -157,7 +157,7 @@ serve(wire, workerData.address);
 #[test]
 fn a_program_hands_batches_to_its_agent_and_waits_for_replies() {
     let idl = xgpu_bindgen::WEBGPU_IDL;
-    let wire = xgpu_bindgen::wire::wire(idl).unwrap();
+    let wire = x_idl::wire::wire(idl).unwrap();
     let dir = std::env::temp_dir().join(format!("xgpu-mailbox-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     for (name, text) in [

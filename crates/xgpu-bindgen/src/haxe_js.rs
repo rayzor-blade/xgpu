@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use crate::haxe::File;
+use x_idl::haxe::File;
 use crate::idl::{Int, Ty};
 
 const PACKAGE: &str = "gpu.js";

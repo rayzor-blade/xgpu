@@ -10,9 +10,9 @@ fn main() -> Result<(), String> {
     }
     let files = match target.as_deref() {
         Some("hashlink") | Some("ash") => {
-            xgpu_bindgen::haxe(xgpu_bindgen::haxe::Runtime::HashLink)?
+            xgpu_bindgen::haxe(x_idl::haxe::Runtime::HashLink)?
         }
-        Some("rayzor") => xgpu_bindgen::haxe(xgpu_bindgen::haxe::Runtime::Rayzor)?,
+        Some("rayzor") => xgpu_bindgen::haxe(x_idl::haxe::Runtime::Rayzor)?,
         Some("javascript") | Some("js") => {
             xgpu_bindgen::haxe_js::generate(xgpu_bindgen::WEBGPU_IDL)?
         }
