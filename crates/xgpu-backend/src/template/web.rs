@@ -70,6 +70,12 @@ struct SurfaceEntry {
     view: i32,
 }
 
+/// The formats a canvas takes, as the plugin's codes; the rest of what it
+/// supports is the same for every canvas.
+struct Capabilities {
+    formats: Vec<i32>,
+}
+
 /// A render pipeline described step by step, as the native builder takes it.
 #[derive(Default)]
 struct Build {
@@ -110,6 +116,7 @@ struct State {
     textures: Slab<()>,
     views: Slab<()>,
     surfaces: Slab<Mutex<SurfaceEntry>>,
+    capabilities: Slab<Capabilities>,
     builders: Slab<Mutex<Build>>,
     pending: Vec<Pending>,
 }
@@ -136,6 +143,7 @@ static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| {
         textures: Slab::new(Kind::Texture),
         views: Slab::new(Kind::View),
         surfaces: Slab::new(Kind::Surface),
+        capabilities: Slab::new(Kind::SurfaceCapabilities),
         builders: Slab::new(Kind::Builder),
         pending: Vec::new(),
     })
@@ -368,16 +376,15 @@ fn power_preference(power: i32) -> Option<wire::GPUPowerPreference> {
     }
 }
 
-fn adapter_options(o: &GpuRequestAdapterOptions) -> Result<wire::GPURequestAdapterOptions, String> {
-    if o.compatibleSurface.is_some() {
-        return unavailable("GpuRequestAdapterOptions.compatibleSurface");
-    }
-    Ok(wire::GPURequestAdapterOptions {
+/// `compatibleSurface` holds of every adapter: a page's one surface is its
+/// canvas, which any WebGPU adapter presents to.
+fn adapter_options(o: &GpuRequestAdapterOptions) -> wire::GPURequestAdapterOptions {
+    wire::GPURequestAdapterOptions {
         feature_level: None,
         power_preference: o.powerPreference.and_then(power_preference),
         force_fallback_adapter: o.forceFallbackAdapter,
         xr_compatible: None,
-    })
+    }
 }
 
 /// WebGPU's features and limits; wgpu's own, and its acceptances of
@@ -529,10 +536,61 @@ pub unsafe fn adapter_request_with(
     instance: i32,
     options: &GpuRequestAdapterOptions,
 ) -> Future<crate::GpuAdapter> {
-    match adapter_options(options) {
-        Ok(options) => request_adapter(instance, Some(options)),
-        Err(message) => rejected(&message),
+    request_adapter(instance, Some(adapter_options(options)))
+}
+
+/// One member of the adapter's `GPUAdapterInfo`, as the agent encodes it.
+fn adapter_info<T: wire::Decode>(
+    adapter: i32,
+    member: impl FnOnce(&mut wire::Encoder, Handle, u32),
+) -> Option<T> {
+    let mut s = state();
+    s.adapters.get(adapter)?;
+    let info = s.transient();
+    let mut bytes = [0u8; 1024];
+    let reply = Reply::new(bytes.as_mut_ptr(), bytes.len());
+    s.commands.gpu_adapter_get_info(handle(adapter), info);
+    member(&mut s.commands, info, reply.at());
+    s.commands.release(info);
+    s.flush();
+    if reply.state.load(SeqCst) != 1 {
+        return None;
     }
+    let len = (reply.len as usize).min(bytes.len());
+    T::decode(&mut wire::Decoder::new(&bytes[..len]))
+}
+
+/// The adapter's description, which a browser may leave empty; then its
+/// device, or its vendor and architecture.
+pub unsafe fn adapter_name(adapter: i32) -> Text {
+    let read = |member: fn(&mut wire::Encoder, Handle, u32)| {
+        adapter_info::<String>(adapter, member).unwrap_or_default()
+    };
+    let mut name = read(wire::Encoder::gpu_adapter_info_get_description);
+    if name.is_empty() {
+        name = read(wire::Encoder::gpu_adapter_info_get_device);
+    }
+    if name.is_empty() {
+        let vendor = read(wire::Encoder::gpu_adapter_info_get_vendor);
+        let architecture = read(wire::Encoder::gpu_adapter_info_get_architecture);
+        name = format!("{vendor} {architecture}").trim().to_owned();
+    }
+    Text::new(&name)
+}
+
+/// The plugin's code for wgpu's `BrowserWebGpu`.
+pub unsafe fn adapter_backend(adapter: i32) -> i32 {
+    if state().adapters.get(adapter).is_some() { 5 } else { 0 }
+}
+
+pub unsafe fn adapter_subgroup_min_size(adapter: i32) -> i32 {
+    adapter_info::<u32>(adapter, wire::Encoder::gpu_adapter_info_get_subgroup_min_size)
+        .map_or(0, |size| size as i32)
+}
+
+pub unsafe fn adapter_subgroup_max_size(adapter: i32) -> i32 {
+    adapter_info::<u32>(adapter, wire::Encoder::gpu_adapter_info_get_subgroup_max_size)
+        .map_or(0, |size| size as i32)
 }
 
 pub unsafe fn adapter_destroy(adapter: i32) {
@@ -1458,6 +1516,86 @@ pub unsafe fn surface_present(_queue: i32, surface: i32) {
     s.flush();
 }
 
+// The plugin's codes for what every canvas presents with: PresentMode's
+// Fifo, AlphaMode's Opaque and PreMultiplied, and TextureUsage's
+// COPY_SRC | COPY_DST | TEXTURE_BINDING | RENDER_ATTACHMENT.
+const CANVAS_PRESENT_MODES: [i32; 1] = [2];
+const CANVAS_ALPHA_MODES: [i32; 2] = [1, 2];
+const CANVAS_USAGES: i32 = 0x01 | 0x02 | 0x04 | 0x10;
+
+/// What WebGPU lets a canvas be configured with: the browser's preferred
+/// format first, then the others a canvas takes.
+pub unsafe fn surface_capabilities(surface: i32, adapter: i32) -> i32 {
+    let preferred = surface_preferred_format(surface, adapter);
+    let mut s = state();
+    if s.surfaces.get(surface).is_none() || s.adapters.get(adapter).is_none() {
+        return 0;
+    }
+    let mut formats = Vec::new();
+    for format in [
+        preferred,
+        wire::GPUTextureFormat::Bgra8unorm as i32,
+        wire::GPUTextureFormat::Rgba8unorm as i32,
+        wire::GPUTextureFormat::Rgba16float as i32,
+    ] {
+        if format >= 0 && !formats.contains(&format) {
+            formats.push(format);
+        }
+    }
+    s.capabilities.put(Capabilities { formats })
+}
+
+pub unsafe fn capabilities_destroy(capabilities: i32) {
+    state().capabilities.remove(capabilities);
+}
+
+fn nth(values: &[i32], index_of: i32) -> i32 {
+    match usize::try_from(index_of).ok().and_then(|i| values.get(i)) {
+        Some(value) => *value,
+        None => {
+            host::raise(ErrorKind::Type, "capability index out of range");
+            0
+        }
+    }
+}
+
+pub unsafe fn capabilities_format_count(c: i32) -> i32 {
+    state().capabilities.get(c).map_or(0, |c| c.formats.len() as i32)
+}
+
+pub unsafe fn capabilities_format(c: i32, index_of: i32) -> i32 {
+    let Some(c) = state().capabilities.get(c) else {
+        return 0;
+    };
+    nth(&c.formats, index_of)
+}
+
+pub unsafe fn capabilities_present_mode_count(c: i32) -> i32 {
+    state().capabilities.get(c).map_or(0, |_| CANVAS_PRESENT_MODES.len() as i32)
+}
+
+pub unsafe fn capabilities_present_mode(c: i32, index_of: i32) -> i32 {
+    if state().capabilities.get(c).is_none() {
+        return 0;
+    }
+    nth(&CANVAS_PRESENT_MODES, index_of)
+}
+
+pub unsafe fn capabilities_alpha_mode_count(c: i32) -> i32 {
+    state().capabilities.get(c).map_or(0, |_| CANVAS_ALPHA_MODES.len() as i32)
+}
+
+pub unsafe fn capabilities_alpha_mode(c: i32, index_of: i32) -> i32 {
+    if state().capabilities.get(c).is_none() {
+        return 0;
+    }
+    nth(&CANVAS_ALPHA_MODES, index_of)
+}
+
+pub unsafe fn capabilities_usages(c: i32) -> i32 {
+    state().capabilities.get(c).map_or(0, |_| CANVAS_USAGES)
+}
+
 // -- render pipelines -------------------------------------------------------
 
 /// A render pipeline descriptor's layout: unset is "auto", as the plugin
@@ -1779,6 +1917,8 @@ pub unsafe fn is_valid(h: i32) -> bool {
         s.views.get(h).is_some()
     } else if is(Kind::Surface) {
         s.surfaces.get(h).is_some()
+    } else if is(Kind::SurfaceCapabilities) {
+        s.capabilities.get(h).is_some()
     } else if is(Kind::Builder) {
         s.builders.get(h).is_some()
     } else {
