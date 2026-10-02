@@ -399,7 +399,6 @@ dependencies = [
 [[package]]
 name = "x_idl"
 version = "0.1.0"
-source = "git+https://github.com/rayzor-blade/x-idl.git?rev=bce92e00cd3b13b1b1ca0e94020b065a28d9e911#bce92e00cd3b13b1b1ca0e94020b065a28d9e911"
 dependencies = [
  "proc-macro2",
  "quote",

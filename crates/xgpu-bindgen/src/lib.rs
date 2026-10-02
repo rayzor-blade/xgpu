@@ -37,20 +37,36 @@ pub fn gpu_api() -> String {
     format!("{GPU_API}\nenum NativeFeature {{ {variants} }}\n")
 }
 
+/// The HashLink library xgpu's primitives load from: `xgpu.hdll`, or
+/// `xgpu.wasm` under Ash in a page.
+pub const HASHLINK_LIBRARY: x_idl::Library<'static> = x_idl::Library("xgpu");
+
 /// Generate xgpu's complete conventional Haxe surface for one runtime.
 pub fn _haxe(runtime: haxe::Runtime) -> Result<Vec<haxe::File>, String> {
-    let namespace = match runtime {
-        haxe::Runtime::HashLink => "gpu",
-        haxe::Runtime::Rayzor => "rayzor.gpu",
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    // A file of this call's own: x-idl reads declarations from a path, and
+    // builds generating at once must not share one.
+    let declaration = std::env::temp_dir().join(format!(
+        "gpu.api.{}.{}.rs",
+        std::process::id(),
+        CALLS.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&declaration, gpu_api())
+        .map_err(|e| format!("failed to write gpu.api.rs: {e}"))?;
+    let files = match runtime {
+        haxe::Runtime::HashLink => {
+            HASHLINK_LIBRARY.haxe("gpu", Some(declaration.clone()), &browser_idl(), runtime)
+        }
+        haxe::Runtime::Rayzor => {
+            haxe::generate("rayzor.gpu", Some(declaration.clone()), &browser_idl(), runtime)
+        }
     };
-    // copy declaration to temp dir
-    let dec_dir = std::env::temp_dir().join("gpu.api.rs");
-    std::fs::write(&dec_dir, gpu_api()).map_err(|e| format!("failed to write gpu.api.rs: {e}"))?;
-
-    haxe::generate(namespace, Some(dec_dir), &browser_idl(), runtime)
+    std::fs::remove_file(&declaration).ok();
+    files
 }
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn pascal(name: &str) -> String {
     let mut result = String::new();
@@ -89,7 +105,7 @@ pub fn generate_rayzor(declaration: Option<PathBuf>, webidl: &str) -> Result<Str
 /// hlwgpu. Resources cross as integer handles, records as GC-finalized native
 /// abstracts, and Promise results as Ash Future carriers.
 pub fn generate_hashlink(declaration: Option<PathBuf>, webidl: &str) -> Result<String, String> {
-    x_idl::generate_hashlink("gpu", declaration, webidl)
+    HASHLINK_LIBRARY.generate_hashlink("gpu", declaration, webidl)
 }
 
 /// Compatibility spelling for existing Caribou build scripts.
@@ -164,6 +180,11 @@ mod tests {
         let generated = generate_hashlink(Some(dec_dir), &browser_idl()).unwrap();
         assert!(generated.contains("hlp_gpu_instance_request_adapter"));
         assert!(generated.contains("Xash_future_"));
+        // Records are xgpu.hdll's abstracts, as the Haxe surface names them.
+        assert!(generated.contains("Xxgpu_GpuDeviceDescriptor_"));
+        let files = _haxe(haxe::Runtime::HashLink).unwrap();
+        let device = &files.iter().find(|f| f.path == "gpu/GpuDevice.hx").unwrap().source;
+        assert!(device.contains("@:hlNative(\"xgpu\", \"gpu_device_create_buffer\")"));
         assert!(generated.contains("runtime :: Managed < GpuDeviceDescriptor >"));
         assert!(generated.contains("value . into_ucs2"));
     }
