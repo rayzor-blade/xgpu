@@ -82,7 +82,7 @@ pub fn generate_caribou(
 /// native package. The adapter supplies Text, Buffer, roots, futures, errors,
 /// and the generic Enum carrier; xgpu supplies the object model and backend.
 pub fn generate_rayzor(declaration: Option<PathBuf>, webidl: &str) -> Result<String, String> {
-    x_idl::generate_rayzor_with_resources("rayzor.gpu", declaration, webidl, &[])
+    x_idl::generate_rayzor_with_resources("gpu", declaration, webidl, &[])
 }
 
 /// Emit the runtime-neutral model and HashLink primitive resolvers used by
@@ -117,48 +117,50 @@ mod tests {
                 #[native(device_name)] fn name(this: &Device) -> Text;
             }
         "#;
-        let api_path = temp_dir().join("tests").join("rayzor_api.rs");
+        let api_path = temp_dir().join("rayzor_api.rs");
+
         std::fs::write(&api_path, api).unwrap();
 
-        let generated = generate_rayzor(Some(api_path), "").unwrap();
+        let generated = generate_rayzor(Some(api_path), WEBGPU_IDL).unwrap();
         assert!(!generated.contains("caribou_abi"));
         assert!(!generated.contains("plugin !"));
         assert!(generated.contains("Rooted < Text >"));
         assert!(generated.contains("impl NativeEnum for Mode"));
-        assert!(generated.contains("export_name = \"xgpu_options_new\""));
-        assert!(generated.contains("export_name = \"xgpu_device_open\""));
+        assert!(generated.contains("export_name = \"xidl_options_new\""));
+        assert!(generated.contains("export_name = \"xidl_device_open\""));
         assert!(generated.contains("host :: raise (ErrorKind :: Runtime"));
-        assert!(generated.contains("pub static XGPU_METHODS"));
-        assert!(generated.contains("\"rayzor::gpu::Device\""));
-        assert!(generated.contains("__xgpu_device_open as * const u8"));
-        assert!(generated.contains("fn __xgpu_options_new (a0 : i64)"));
+        assert!(generated.contains("pub static XIDL_METHODS"));
+        assert!(generated.contains("\"gpu::Device\""));
+        assert!(generated.contains("__xidl_device_open as * const u8"));
+        assert!(generated.contains("fn __xidl_options_new (a0 : i64)"));
         assert!(generated.contains("transmute :: < i64 , Enum < Mode > >"));
         assert!(generated.contains("param_types : [3u8 , 0u8"));
+    }
+
+
+    fn gpu_decl(content:&str)-> Option<PathBuf> {
+        // make file unique to avoid collisions with other tests
+        let file_name = format!("gpu.api.{}.rs", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
+        let path = temp_dir().join(file_name);
+        std::fs::write(&path, content).ok()?;
+        Some(path)
     }
 
     #[test]
     fn the_complete_rayzor_model_and_registration_generate_together() {
         // copy declaration to temp dir
-        let dec_dir = std::env::temp_dir().join("gpu.api.rs");
-        std::fs::write(&dec_dir, gpu_api())
-            .map_err(|e| format!("failed to write gpu.api.rs: {e}"))
-            .unwrap();
-
+        let dec_dir = gpu_decl(&gpu_api()).unwrap();
         let generated = generate_rayzor(Some(dec_dir), &browser_idl()).unwrap();
         assert!(!generated.contains("caribou_abi"));
-        assert!(generated.contains("xgpu_gpu_device_create_buffer"));
-        assert!(generated.contains("\"rayzor::gpu::GpuDevice\""));
-        assert!(generated.contains("pub fn xgpu_runtime_symbols"));
+        assert!(generated.contains("xidl_gpu_device_create_buffer"));
+        assert!(generated.contains("\"gpu::GpuDevice\""));
+        assert!(generated.contains("pub fn xidl_runtime_symbols"));
     }
 
     #[test]
     fn the_complete_hashlink_model_emits_ash_future_primitives() {
         // copy declaration to temp dir
-        let dec_dir = std::env::temp_dir().join("gpu.api.rs");
-        std::fs::write(&dec_dir, gpu_api())
-            .map_err(|e| format!("failed to write gpu.api.rs: {e}"))
-            .unwrap();
-
+        let dec_dir = gpu_decl(&gpu_api()).unwrap();
         let generated = generate_hashlink(Some(dec_dir), &browser_idl()).unwrap();
         assert!(generated.contains("hlp_gpu_instance_request_adapter"));
         assert!(generated.contains("Xash_future_"));
@@ -169,7 +171,7 @@ mod tests {
     #[test]
     fn rayzor_can_supply_a_resource_wrapper_for_runtime_extensions() {
         // copy declaration to temp dir
-        let dec_dir = std::env::temp_dir().join("gpu.api.rs");
+        let dec_dir = gpu_decl(&gpu_api()).unwrap();
         std::fs::write(
             &dec_dir,
             r#"
@@ -185,7 +187,7 @@ mod tests {
         .unwrap();
 
         let generated =
-            x_idl::generate_rayzor_with_resources("rayzor.gpu", Some(dec_dir), "", &["GpuBuffer"])
+            x_idl::generate_rayzor_with_resources("gpu", Some(dec_dir), "", &["GpuBuffer"])
                 .unwrap();
         assert!(!generated.contains("pub struct GpuBuffer"));
         assert!(generated.contains("impl GpuBuffer"));
