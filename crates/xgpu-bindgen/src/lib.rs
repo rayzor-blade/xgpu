@@ -7,7 +7,7 @@
 //! does not infer native GPU semantics from WebIDL interfaces or generate a
 //! language-specific heap layout.
 
-pub use x_idl::{wire, haxe, web_backend, hashlink_web_backend};
+pub use x_idl::{wire, haxe, web_backend, hashlink_web_backend, generate_rayzor_with_resources};
 pub mod haxe_js;
 
 
