@@ -7,8 +7,7 @@
 //! does not infer native GPU semantics from WebIDL interfaces or generate a
 //! language-specific heap layout.
 
-use x_idl::haxe as x_idl_haxe;
-pub use x_idl::{wire, web_backend, hashlink_web_backend};
+pub use x_idl::{wire, haxe, web_backend, hashlink_web_backend};
 pub mod haxe_js;
 
 
@@ -39,16 +38,16 @@ pub fn gpu_api() -> String {
 }
 
 /// Generate xgpu's complete conventional Haxe surface for one runtime.
-pub fn _haxe(runtime: x_idl_haxe::Runtime) -> Result<Vec<x_idl_haxe::File>, String> {
+pub fn _haxe(runtime: haxe::Runtime) -> Result<Vec<haxe::File>, String> {
     let namespace = match runtime {
-        x_idl_haxe::Runtime::HashLink => "gpu",
-        x_idl_haxe::Runtime::Rayzor => "rayzor.gpu",
+        haxe::Runtime::HashLink => "gpu",
+        haxe::Runtime::Rayzor => "rayzor.gpu",
     };
     // copy declaration to temp dir
     let dec_dir = std::env::temp_dir().join("gpu.api.rs");
     std::fs::write(&dec_dir, gpu_api()).map_err(|e| format!("failed to write gpu.api.rs: {e}"))?;
 
-    x_idl_haxe::generate(namespace, Some(dec_dir), &browser_idl(), runtime)
+    haxe::generate(namespace, Some(dec_dir), &browser_idl(), runtime)
 }
 
 use std::path::PathBuf;
