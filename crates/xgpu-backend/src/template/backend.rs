@@ -470,7 +470,14 @@ fn requested_features(requested: &[i32]) -> Result<wgpu::Features, String> {
     Ok(enabled)
 }
 
-fn requested_limits(requested: &[(i32, i64)]) -> Result<wgpu::Limits, String> {
+/// The limits a device is asked for: WebGPU's defaults, raised by what was
+/// requested. A downlevel adapter (GLES, WebGL2) does not reach every
+/// default, so they are first lowered to what `adapter` has; a WebGPU adapter
+/// meets them all, and keeps them.
+fn requested_limits(
+    requested: &[(i32, i64)],
+    adapter: &wgpu::Limits,
+) -> Result<wgpu::Limits, String> {
     fn u32_value(value: i64) -> Result<u32, String> {
         u32::try_from(value).map_err(|_| format!("GPU limit value {value} is outside u32"))
     }
@@ -478,7 +485,7 @@ fn requested_limits(requested: &[(i32, i64)]) -> Result<wgpu::Limits, String> {
         u64::try_from(value).map_err(|_| format!("GPU limit value {value} is negative"))
     }
 
-    let defaults = wgpu::Limits::default();
+    let defaults = wgpu::Limits::default().or_worse_values_from(adapter);
     let mut limits = defaults.clone();
     for &(which, value) in requested {
         use crate::Limit::*;
@@ -579,7 +586,7 @@ fn device_request_configured(adapter: i32, d: &GpuDeviceDescriptor) -> Future<cr
         Ok(features) => features,
         Err(error) => return rejected_future(&error),
     };
-    let requested_limits = match requested_limits(&d.requiredLimits)
+    let requested_limits = match requested_limits(&d.requiredLimits, &adapter.limits())
         .and_then(|limits| native::requested_limits(limits, &d.requiredNativeLimits))
     {
         Ok(limits) => limits,
@@ -3166,14 +3173,17 @@ mod capability_tests {
     #[test]
     fn requested_limits_preserve_defaults_and_validate_values() {
         let defaults = wgpu::Limits::default();
-        let requested = requested_limits(&[
+        let requested = requested_limits(
+            &[
             (crate::Limit::MaxBindGroups.native(), 1),
             (crate::Limit::MaxBufferSize.native(), 1 << 30),
             (crate::Limit::MaxStorageBuffersInVertexStage.native(), 16),
             (crate::Limit::MaxStorageBuffersPerShaderStage.native(), 12),
             (crate::Limit::MaxStorageTexturesInFragmentStage.native(), 8),
             (crate::Limit::MaxStorageTexturesPerShaderStage.native(), 6),
-        ])
+            ],
+            &defaults,
+        )
         .unwrap();
         assert_eq!(requested.max_bind_groups, defaults.max_bind_groups);
         assert_eq!(requested.max_buffer_size, 1 << 30);
@@ -3193,8 +3203,20 @@ mod capability_tests {
             ),
             Some(8)
         );
-        assert!(requested_limits(&[(crate::Limit::MaxBufferSize.native(), -1)]).is_err());
-        assert!(requested_limits(&[(i32::MAX, 8)]).is_err());
+        assert!(requested_limits(&[(crate::Limit::MaxBufferSize.native(), -1)], &defaults).is_err());
+        assert!(requested_limits(&[(i32::MAX, 8)], &defaults).is_err());
+    }
+
+    #[test]
+    fn a_downlevel_adapter_is_asked_for_no_more_than_it_has() {
+        let webgl2 = wgpu::Limits::downlevel_webgl2_defaults();
+        let requested = requested_limits(&[], &webgl2).unwrap();
+        assert_eq!(requested.max_storage_buffers_per_shader_stage, 0);
+        assert_eq!(requested.max_texture_dimension_2d, 2048);
+        assert!(requested.check_limits(&webgl2));
+        // What it does have can still be asked for, up to its own limit.
+        let raised = requested_limits(&[(crate::Limit::MaxBindGroups.native(), 4)], &webgl2).unwrap();
+        assert_eq!(raised.max_bind_groups, 4);
     }
 
     #[test]
