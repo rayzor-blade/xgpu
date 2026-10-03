@@ -706,6 +706,10 @@ trait GpuAdapter {
     fn supportsNative(this: &GpuAdapter, feature: Enum<NativeFeature>) -> bool;
     #[native(adapter_native_limit)]
     fn nativeLimit(this: &GpuAdapter, which: Enum<NativeLimit>) -> i64;
+    // A capability WebGPU requires that a downlevel adapter, such as GLES or
+    // WebGL2, may lack. Every one holds on a WebGPU adapter.
+    #[native(adapter_downlevel)]
+    fn supportsDownlevel(this: &GpuAdapter, flag: Enum<DownlevelFlag>) -> bool;
     // TextureUsage bits the format allows on this adapter.
     #[native(adapter_format_usages)]
     fn textureFormatUsages(this: &GpuAdapter, format: Enum<TextureFormat>) -> i32;

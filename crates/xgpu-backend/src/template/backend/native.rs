@@ -23,6 +23,22 @@ pub(super) fn requested_features(requested: &[i32]) -> Result<wgpu::Features, St
         })
 }
 
+/// A `DownlevelFlag` code: its position in `wgpu::DownlevelFlags::all()`,
+/// the order build.rs generated the enum in.
+fn downlevel_flag(which: i32) -> Option<wgpu::DownlevelFlags> {
+    let index = usize::try_from(which).ok()?;
+    wgpu::DownlevelFlags::all()
+        .iter_names()
+        .nth(index)
+        .map(|(_, flag)| flag)
+}
+
+pub unsafe fn adapter_downlevel(adapter: i32, which: i32) -> bool {
+    let adapter = find!(ADAPTERS, adapter, false);
+    downlevel_flag(which)
+        .is_some_and(|flag| adapter.get_downlevel_capabilities().flags.contains(flag))
+}
+
 pub unsafe fn adapter_native_feature(adapter: i32, which: i32) -> bool {
     let adapter = find!(ADAPTERS, adapter, false);
     native_feature(which).is_some_and(|flag| adapter.features().contains(flag))

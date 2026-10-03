@@ -28,16 +28,25 @@ pub fn browser_idl() -> String {
     format!("{WEBGPU_IDL}\n{CANVAS_IDL}")
 }
 
-/// The canonical declaration with wgpu's native feature catalog appended.
-/// Keeping this here makes every runtime emitter follow the exact wgpu version
-/// xgpu implements.
+/// The canonical declaration with wgpu's native feature and downlevel flag
+/// catalogs appended. Keeping this here makes every runtime emitter follow
+/// the exact wgpu version xgpu implements.
 pub fn gpu_api() -> String {
-    let variants = wgpu_types::Features::all()
-        .iter_names()
-        .map(|(name, _)| pascal(&name.to_ascii_lowercase().replace('_', "-")))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{GPU_API}\nenum NativeFeature {{ {variants} }}\n")
+    fn variants<'a>(names: impl Iterator<Item = &'a str>) -> String {
+        names
+            .map(|name| pascal(&name.to_ascii_lowercase().replace('_', "-")))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+    let features = variants(wgpu_types::Features::all().iter_names().map(|(n, _)| n));
+    let downlevel = variants(
+        wgpu_types::DownlevelFlags::all()
+            .iter_names()
+            .map(|(n, _)| n),
+    );
+    format!(
+        "{GPU_API}\nenum NativeFeature {{ {features} }}\nenum DownlevelFlag {{ {downlevel} }}\n"
+    )
 }
 
 /// The HashLink library xgpu's primitives load from: `xgpu.hdll`, or

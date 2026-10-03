@@ -3366,6 +3366,11 @@ fn limit(which: i32, get: impl FnOnce(&mut wire::Encoder, Handle)) -> i64 {
     }
 }
 
+/// Browser WebGPU is a full implementation, so no downlevel flag is missing.
+pub unsafe fn adapter_downlevel(adapter: i32, _which: i32) -> bool {
+    state().adapters.get(adapter).is_some()
+}
+
 pub unsafe fn adapter_limit(adapter: i32, which: i32) -> i64 {
     if state().adapters.get(adapter).is_none() {
         return 0;
