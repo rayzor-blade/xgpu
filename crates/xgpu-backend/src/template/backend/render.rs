@@ -140,10 +140,39 @@ pub unsafe fn compute_pipeline_create_async(
     let future = Future::new();
     let completion = Rooted::new(future);
     spawn_gpu(async move {
-        let handle = PIPELINES.lock().unwrap().put(build_compute(&plan));
-        settle_pipeline(&completion, handle);
+        let built = validated(&plan.device, || build_compute(&plan)).await;
+        settle_built(&completion, &PIPELINES, built);
     });
     future
+}
+
+/// `build`, inside a validation scope: an invalid pipeline rejects its
+/// future, as WebGPU's asynchronous creation does, rather than resolving and
+/// reporting an uncaptured error.
+pub(super) async fn validated<T>(
+    device: &wgpu::Device,
+    build: impl FnOnce() -> T,
+) -> Result<T, String> {
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let built = build();
+    match scope.pop().await {
+        Some(error) => Err(error.to_string()),
+        None => Ok(built),
+    }
+}
+
+/// Puts a validated pipeline in `table` and settles `completion` with it.
+pub(super) fn settle_built<P>(
+    completion: &Rooted<Future<crate::GpuPipeline>>,
+    table: &std::sync::Mutex<Slab<P>>,
+    built: Result<P, String>,
+) {
+    match built {
+        Ok(pipeline) => settle_pipeline(completion, table.lock().unwrap().put(pipeline)),
+        Err(message) => {
+            completion.get().reject(Text::new(&message).value());
+        }
+    }
 }
 
 pub(super) fn settle_pipeline(completion: &Rooted<Future<crate::GpuPipeline>>, handle: i32) {
@@ -393,8 +422,8 @@ pub unsafe fn render_pipeline_create_async(
     let future = Future::new();
     let completion = Rooted::new(future);
     spawn_gpu(async move {
-        let handle = RENDER_PIPELINES.lock().unwrap().put(build_render(&plan));
-        settle_pipeline(&completion, handle);
+        let built = validated(&plan.device, || build_render(&plan)).await;
+        settle_built(&completion, &RENDER_PIPELINES, built);
     });
     future
 }

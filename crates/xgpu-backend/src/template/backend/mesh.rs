@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use super::render::{
     Stage, color_target, count, depth_stencil, label, multisample, options, pipeline_layout,
-    primitive, rendering, settle_pipeline,
+    primitive, rendering, settle_built, validated,
 };
 use super::*;
 use crate::GpuMeshPipelineDescriptor;
@@ -121,8 +121,8 @@ pub unsafe fn mesh_pipeline_create_async(
     let future = Future::new();
     let completion = Rooted::new(future);
     spawn_gpu(async move {
-        let handle = RENDER_PIPELINES.lock().unwrap().put(build_mesh(&plan));
-        settle_pipeline(&completion, handle);
+        let built = validated(&plan.device, || build_mesh(&plan)).await;
+        settle_built(&completion, &RENDER_PIPELINES, built);
     });
     future
 }
