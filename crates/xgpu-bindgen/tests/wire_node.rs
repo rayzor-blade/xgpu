@@ -115,7 +115,7 @@ fn rust_encodes_and_javascript_decodes_the_webgpu_wire() {
 
     assert_eq!(
         out.trim(),
-        r#"{"log":[["gpu","requestAdapter",[null]],["gpu.requestAdapter","requestDevice",[null]],["gpu.requestAdapter.requestDevice","createBuffer",[{"label":"uniforms","size":1024,"usage":72}]],["gpu.requestAdapter.requestDevice.queue","writeBuffer",["@gpu.requestAdapter.requestDevice.createBuffer",0,[1,2,3,4],null,null]]],"replies":[1,1],"handles":[1,2,3,4,5]}"#
+        r#"{"log":[["gpu","requestAdapter",[]],["gpu.requestAdapter","requestDevice",[]],["gpu.requestAdapter.requestDevice","createBuffer",[{"label":"uniforms","size":1024,"usage":72}]],["gpu.requestAdapter.requestDevice.queue","writeBuffer",["@gpu.requestAdapter.requestDevice.createBuffer",0,[1,2,3,4]]]],"replies":[1,1],"handles":[1,2,3,4,5]}"#
     );
 }
 

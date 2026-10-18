@@ -194,7 +194,7 @@ fn a_program_hands_batches_to_its_agent_and_waits_for_replies() {
     // (1) and the range past the end rejected (2); the size is 1024.
     assert_eq!(
         out.trim(),
-        r#"{"result":"111121024","log":[["gpu","requestAdapter",[null]],["gpu.requestAdapter","requestDevice",[null]],["gpu.requestAdapter.requestDevice","createBuffer",[{"size":1024,"usage":72}]],["gpu.requestAdapter.requestDevice.queue","writeBuffer",["@gpu.requestAdapter.requestDevice.createBuffer",0,[1,2,3,4],null,null]]],"handles":[1,3,4,5]}"#
+        r#"{"result":"111121024","log":[["gpu","requestAdapter",[]],["gpu.requestAdapter","requestDevice",[]],["gpu.requestAdapter.requestDevice","createBuffer",[{"size":1024,"usage":72}]],["gpu.requestAdapter.requestDevice.queue","writeBuffer",["@gpu.requestAdapter.requestDevice.createBuffer",0,[1,2,3,4]]]],"handles":[1,3,4,5]}"#
     );
 }
 
