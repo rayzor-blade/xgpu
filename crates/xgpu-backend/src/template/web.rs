@@ -38,6 +38,10 @@ const CANVAS: Handle = Handle(2);
 /// That canvas itself, whose size is the drawing buffer's.
 const CANVAS_ELEMENT: Handle = Handle(3);
 
+/// The handles the agent holds before the plugin makes any: the plugin's own
+/// start after them.
+const ROOTS: u32 = 3;
+
 /// Handles of objects the plugin makes and releases in one batch (passes,
 /// command buffers, layouts it only borrows), below every plugin handle.
 const TRANSIENT: u32 = 1 << 26;
@@ -156,7 +160,7 @@ static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| {
         staged: Vec::new(),
         drawing: false,
         agent: false,
-        next: 2,
+        next: ROOTS,
         instances: Slab::new(Kind::Instance),
         adapters: Slab::new(Kind::Adapter),
         devices: Slab::new(Kind::Device),
@@ -226,11 +230,10 @@ impl State {
     }
 
     fn transient(&mut self) -> Handle {
-        self.next = if self.next + 1 >= TRANSIENT {
-            3
-        } else {
-            self.next + 1
-        };
+        self.next += 1;
+        if self.next >= TRANSIENT {
+            self.next = ROOTS + 1;
+        }
         Handle(self.next)
     }
 
