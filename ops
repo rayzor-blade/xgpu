@@ -1,1 +1,1 @@
-{"author":{"id":"a66e0db0201c515c5090d5e52c036411dda9ba2f138110a926616a18a8ea0dd6"},"ops":[{"type":3,"timestamp":1792313344,"nonce":"UVFDqacPPtQ/QgTsGrA8yVzQr34=","message":"Fixed in d4139c067b5483d9c089a8c241bd544e6a82c39b. Not yet in hlwgpu, which pins xgpu.","files":null}]}
+{"author":{"id":"a66e0db0201c515c5090d5e52c036411dda9ba2f138110a926616a18a8ea0dd6"},"ops":[{"type":4,"timestamp":1792313345,"nonce":"DgZ0PBtWD9lz93KYArLbFyTC8nA=","status":2}]}
